@@ -50,6 +50,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -125,6 +127,10 @@ class MainActivity : ComponentActivity() {
                 updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
             }
             arSession.configure(config)
+
+            // FIX: Start the hardware cameras immediately
+            arSession.resume()
+
             session = arSession
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create AR session: ${e.message}")
@@ -164,20 +170,48 @@ class MainActivity : ComponentActivity() {
         session = null
     }
 
-    // OpenGL background renderer to trigger ARCore frame updates
     private inner class ARCameraRenderer : GLSurfaceView.Renderer {
         private var textureId = -1
+        private var quadProgram = 0
+        private var positionAttrib = 0
+        private var texCoordAttrib = 0
+
+        // A basic full-screen quad
+        private val vertices = floatArrayOf(
+            -1f, -1f,  1f, -1f,
+            -1f,  1f,  1f,  1f
+        )
+
+        // Texture coordinates rotated 90 degrees for portrait mode
+        private val texCoords = floatArrayOf(
+             0f, 1f,  0f, 0f,
+             1f, 1f,  1f, 0f
+        )
+
+        private val vertexBuffer = ByteBuffer.allocateDirect(vertices.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(vertices); position(0) }
+        private val texCoordBuffer = ByteBuffer.allocateDirect(texCoords.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(texCoords); position(0) }
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-            GLES20.glClearColor(0.1f, 0.1f, 0.1f, 1.0f)
             val textures = IntArray(1)
             GLES20.glGenTextures(1, textures, 0)
             textureId = textures[0]
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+
+            val vertexShader = GLES20.glCreateShader(GLES20.GL_VERTEX_SHADER)
+            GLES20.glShaderSource(vertexShader, "attribute vec4 p; attribute vec2 t; varying vec2 v; void main(){ gl_Position=p; v=t; }")
+            GLES20.glCompileShader(vertexShader)
+
+            val fragShader = GLES20.glCreateShader(GLES20.GL_FRAGMENT_SHADER)
+            GLES20.glShaderSource(fragShader, "#extension GL_OES_EGL_image_external : require\nprecision mediump float; varying vec2 v; uniform samplerExternalOES tex; void main(){ gl_FragColor=texture2D(tex, v); }")
+            GLES20.glCompileShader(fragShader)
+
+            quadProgram = GLES20.glCreateProgram()
+            GLES20.glAttachShader(quadProgram, vertexShader)
+            GLES20.glAttachShader(quadProgram, fragShader)
+            GLES20.glLinkProgram(quadProgram)
+
+            positionAttrib = GLES20.glGetAttribLocation(quadProgram, "p")
+            texCoordAttrib = GLES20.glGetAttribLocation(quadProgram, "t")
 
             session?.setCameraTextureName(textureId)
         }
@@ -194,14 +228,29 @@ class MainActivity : ComponentActivity() {
             try {
                 val frame = activeSession.update()
 
-                // Record frames if toggled on and interval threshold met
+                // Draw the camera feed to the screen
+                GLES20.glUseProgram(quadProgram)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
+
+                GLES20.glEnableVertexAttribArray(positionAttrib)
+                GLES20.glVertexAttribPointer(positionAttrib, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
+
+                GLES20.glEnableVertexAttribArray(texCoordAttrib)
+                GLES20.glVertexAttribPointer(texCoordAttrib, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer)
+
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+                GLES20.glDisableVertexAttribArray(positionAttrib)
+                GLES20.glDisableVertexAttribArray(texCoordAttrib)
+
                 val now = System.currentTimeMillis()
                 if (isRecordingState.value && (now - lastSavedTimestampMs >= captureIntervalMs)) {
                     lastSavedTimestampMs = now
                     processAndSaveFrame(frame, now)
                 }
-            } catch (_: Exception) {
-                // Ignore transient frame skips during camera warmup
+            } catch (e: Exception) {
+                // Ignore transient frame skips
             }
         }
     }
