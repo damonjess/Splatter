@@ -11,6 +11,7 @@ import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -40,11 +41,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
+import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Frame
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
-import com.google.ar.core.exceptions.NotYetAvailableException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -59,12 +61,15 @@ class MainActivity : ComponentActivity() {
 
     private var session: Session? = null
     private var glSurfaceView: GLSurfaceView? = null
+    private var userRequestedInstall = true
 
-    // Recording & state controls
+    // State indicators
     private val isRecordingState = mutableStateOf(false)
     private val frameCountState = mutableStateOf(0)
+    private val trackingStatusText = mutableStateOf("Initializing AR...")
+    
     private var lastSavedTimestampMs = 0L
-    private val captureIntervalMs = 150L // ~6-7 captures per second to prevent I/O bottlenecks
+    private val captureIntervalMs = 150L // ~6-7 captures per second
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -81,14 +86,14 @@ class MainActivity : ComponentActivity() {
                 contract = ActivityResultContracts.RequestPermission()
             ) { isGranted ->
                 hasCameraPermission = isGranted
-                if (isGranted) initARSession()
+                if (isGranted) checkAndInitAR()
             }
 
             LaunchedEffect(Unit) {
                 if (!hasCameraPermission) {
                     permissionLauncher.launch(Manifest.permission.CAMERA)
                 } else {
-                    initARSession()
+                    checkAndInitAR()
                 }
             }
 
@@ -96,6 +101,7 @@ class MainActivity : ComponentActivity() {
                 CaptureScreen(
                     isRecording = isRecordingState.value,
                     frameCount = frameCountState.value,
+                    statusText = trackingStatusText.value,
                     onToggleRecording = {
                         val willRecord = !isRecordingState.value
                         if (willRecord) {
@@ -113,27 +119,47 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun checkAndInitAR() {
+        try {
+            if (session == null) {
+                // Ensure Google Play Services for AR is installed and compatible
+                when (ArCoreApk.getInstance().requestInstall(this, userRequestedInstall)) {
+                    ArCoreApk.InstallStatus.INSTALL_REQUESTED -> {
+                        userRequestedInstall = false
+                        return
+                    }
+                    ArCoreApk.InstallStatus.INSTALLED -> {
+                        initARSession()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "ARCore installation or initialization failed", e)
+            Toast.makeText(this, "ARCore Error: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun initARSession() {
         if (session != null) return
         try {
             val arSession = Session(this)
             val config = Config(arSession).apply {
-                depthMode = if (arSession.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)) {
-                    Config.DepthMode.RAW_DEPTH_ONLY
-                } else {
-                    Config.DepthMode.AUTOMATIC
+                // Safe depth mode cascade to prevent UnsupportedConfigurationException
+                depthMode = when {
+                    arSession.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY) -> Config.DepthMode.RAW_DEPTH_ONLY
+                    arSession.isDepthModeSupported(Config.DepthMode.AUTOMATIC) -> Config.DepthMode.AUTOMATIC
+                    else -> Config.DepthMode.DISABLED
                 }
                 focusMode = Config.FocusMode.FIXED
                 updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
             }
             arSession.configure(config)
-
-            // FIX: Start the hardware cameras immediately
             arSession.resume()
-
             session = arSession
+            Log.i(TAG, "AR Session created successfully with depthMode: ${config.depthMode}")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create AR session: ${e.message}")
+            Log.e(TAG, "Failed to create AR session: ${e.message}", e)
+            trackingStatusText.value = "Failed: ${e.message}"
         }
     }
 
@@ -151,10 +177,13 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         try {
-            session?.resume()
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                checkAndInitAR()
+                session?.resume()
+            }
             glSurfaceView?.onResume()
         } catch (e: Exception) {
-            Log.e(TAG, "Error resuming session: ${e.message}")
+            Log.e(TAG, "Error resuming session: ${e.message}", e)
         }
     }
 
@@ -172,24 +201,20 @@ class MainActivity : ComponentActivity() {
 
     private inner class ARCameraRenderer : GLSurfaceView.Renderer {
         private var textureId = -1
+        private var isTextureBoundToSession = false
         private var quadProgram = 0
         private var positionAttrib = 0
         private var texCoordAttrib = 0
 
-        // A basic full-screen quad
         private val vertices = floatArrayOf(
             -1f, -1f,  1f, -1f,
             -1f,  1f,  1f,  1f
         )
 
-        // Texture coordinates rotated 90 degrees for portrait mode
-        private val texCoords = floatArrayOf(
-             0f, 1f,  0f, 0f,
-             1f, 1f,  1f, 0f
-        )
-
-        private val vertexBuffer = ByteBuffer.allocateDirect(vertices.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(vertices); position(0) }
-        private val texCoordBuffer = ByteBuffer.allocateDirect(texCoords.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(texCoords); position(0) }
+        private val vertexBuffer = ByteBuffer.allocateDirect(vertices.size * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(vertices); position(0) }
+        private val transformedTexCoordBuffer = ByteBuffer.allocateDirect(vertices.size * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             val textures = IntArray(1)
@@ -197,38 +222,68 @@ class MainActivity : ComponentActivity() {
             textureId = textures[0]
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
 
-            val vertexShader = GLES20.glCreateShader(GLES20.GL_VERTEX_SHADER)
-            GLES20.glShaderSource(vertexShader, "attribute vec4 p; attribute vec2 t; varying vec2 v; void main(){ gl_Position=p; v=t; }")
-            GLES20.glCompileShader(vertexShader)
+            // CRITICAL: Set texture filters or GL_TEXTURE_EXTERNAL_OES will render black
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
 
-            val fragShader = GLES20.glCreateShader(GLES20.GL_FRAGMENT_SHADER)
-            GLES20.glShaderSource(fragShader, "#extension GL_OES_EGL_image_external : require\nprecision mediump float; varying vec2 v; uniform samplerExternalOES tex; void main(){ gl_FragColor=texture2D(tex, v); }")
-            GLES20.glCompileShader(fragShader)
+            val vShader = GLES20.glCreateShader(GLES20.GL_VERTEX_SHADER).apply {
+                GLES20.glShaderSource(this, "attribute vec4 p; attribute vec2 t; varying vec2 v; void main(){ gl_Position=p; v=t; }")
+                GLES20.glCompileShader(this)
+            }
 
-            quadProgram = GLES20.glCreateProgram()
-            GLES20.glAttachShader(quadProgram, vertexShader)
-            GLES20.glAttachShader(quadProgram, fragShader)
-            GLES20.glLinkProgram(quadProgram)
+            val fShader = GLES20.glCreateShader(GLES20.GL_FRAGMENT_SHADER).apply {
+                GLES20.glShaderSource(this, "#extension GL_OES_EGL_image_external : require\nprecision mediump float; varying vec2 v; uniform samplerExternalOES tex; void main(){ gl_FragColor=texture2D(tex, v); }")
+                GLES20.glCompileShader(this)
+            }
+
+            quadProgram = GLES20.glCreateProgram().apply {
+                GLES20.glAttachShader(this, vShader)
+                GLES20.glAttachShader(this, fShader)
+                GLES20.glLinkProgram(this)
+            }
 
             positionAttrib = GLES20.glGetAttribLocation(quadProgram, "p")
             texCoordAttrib = GLES20.glGetAttribLocation(quadProgram, "t")
-
-            session?.setCameraTextureName(textureId)
+            isTextureBoundToSession = false
         }
 
         override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
             GLES20.glViewport(0, 0, width, height)
-            session?.setDisplayGeometry(0, width, height)
+            @Suppress("DEPRECATION")
+            val displayRotation = windowManager.defaultDisplay.rotation
+            session?.setDisplayGeometry(displayRotation, width, height)
         }
 
         override fun onDrawFrame(gl: GL10?) {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
             val activeSession = session ?: return
 
+            // CRITICAL: Bind texture ID as soon as both session and texture exist
+            if (!isTextureBoundToSession && textureId != -1) {
+                try {
+                    activeSession.setCameraTextureName(textureId)
+                    isTextureBoundToSession = true
+                    Log.i(TAG, "Camera texture bound to AR session successfully.")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed binding camera texture: ${e.message}")
+                    return
+                }
+            }
+
             try {
                 val frame = activeSession.update()
 
-                // Draw the camera feed to the screen
+                // Transform quad coordinates to display-oriented texture coordinates
+                frame.transformCoordinates2d(
+                    Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
+                    vertexBuffer,
+                    Coordinates2d.TEXTURE_NORMALIZED,
+                    transformedTexCoordBuffer
+                )
+
+                // Render camera background quad
                 GLES20.glUseProgram(quadProgram)
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
@@ -237,20 +292,31 @@ class MainActivity : ComponentActivity() {
                 GLES20.glVertexAttribPointer(positionAttrib, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
 
                 GLES20.glEnableVertexAttribArray(texCoordAttrib)
-                GLES20.glVertexAttribPointer(texCoordAttrib, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer)
+                GLES20.glVertexAttribPointer(texCoordAttrib, 2, GLES20.GL_FLOAT, false, 0, transformedTexCoordBuffer)
 
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
                 GLES20.glDisableVertexAttribArray(positionAttrib)
                 GLES20.glDisableVertexAttribArray(texCoordAttrib)
 
+                // Update UI tracking state
+                val trackingState = frame.camera.trackingState
+                runOnUiThread {
+                    trackingStatusText.value = when (trackingState) {
+                        TrackingState.TRACKING -> if (isRecordingState.value) "Capturing..." else "Ready (Tracking Locked)"
+                        TrackingState.PAUSED -> "Searching for features... (Move slowly)"
+                        TrackingState.STOPPED -> "Tracking Stopped"
+                    }
+                }
+
+                // Record frame if active and threshold met
                 val now = System.currentTimeMillis()
                 if (isRecordingState.value && (now - lastSavedTimestampMs >= captureIntervalMs)) {
                     lastSavedTimestampMs = now
                     processAndSaveFrame(frame, now)
                 }
             } catch (e: Exception) {
-                // Ignore transient frame skips
+                Log.w(TAG, "Frame render loop skipped: ${e.message}")
             }
         }
     }
@@ -258,47 +324,48 @@ class MainActivity : ComponentActivity() {
     private fun processAndSaveFrame(frame: Frame, timestamp: Long) {
         if (frame.camera.trackingState != TrackingState.TRACKING) return
 
-        // 1. Extract Pose (Column-major 4x4 matrix)
         val poseMatrix = FloatArray(16)
         frame.camera.pose.toMatrix(poseMatrix, 0)
 
-        // 2. Extract Images safely
         var rgbImage: Image? = null
         var depthImage: Image? = null
 
         try {
             rgbImage = frame.acquireCameraImage()
+
+            // Safe depth acquisition matching session config
             depthImage = try {
-                frame.acquireRawDepthImage16Bits()
-            } catch (_: NotYetAvailableException) {
+                when (session?.config?.depthMode) {
+                    Config.DepthMode.RAW_DEPTH_ONLY -> frame.acquireRawDepthImage16Bits()
+                    Config.DepthMode.AUTOMATIC -> frame.acquireDepthImage16Bits()
+                    else -> null
+                }
+            } catch (_: Exception) {
                 null
             }
 
-            if (depthImage == null) {
-                rgbImage.close()
-                return
+            val depthBytes: ByteArray? = depthImage?.let { depth ->
+                val buffer = depth.planes[0].buffer
+                val bytes = ByteArray(buffer.remaining())
+                buffer.get(bytes)
+                bytes
             }
-
-            // Extract byte buffers immediately before closing frame handles
-            val depthBuffer = depthImage.planes[0].buffer
-            val depthBytes = ByteArray(depthBuffer.remaining())
-            depthBuffer.get(depthBytes)
 
             val jpegBytes = convertYuvToJpeg(rgbImage)
 
-            // Increment UI counter
             runOnUiThread { frameCountState.value += 1 }
 
-            // 3. Offload file writes to background I/O
             val targetDir = File(getExternalFilesDir(null), "splat_dataset").apply { mkdirs() }
             CoroutineScope(Dispatchers.IO).launch {
                 File(targetDir, "pose_$timestamp.txt").writeText(poseMatrix.joinToString(","))
-                File(targetDir, "depth_$timestamp.raw").writeBytes(depthBytes)
                 File(targetDir, "rgb_$timestamp.jpg").writeBytes(jpegBytes)
+                if (depthBytes != null) {
+                    File(targetDir, "depth_$timestamp.raw").writeBytes(depthBytes)
+                }
             }
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error acquiring frame data: ${e.message}")
+            Log.e(TAG, "Error acquiring frame data: ${e.message}", e)
         } finally {
             rgbImage?.close()
             depthImage?.close()
@@ -336,17 +403,16 @@ class MainActivity : ComponentActivity() {
 fun CaptureScreen(
     isRecording: Boolean,
     frameCount: Int,
+    statusText: String,
     onToggleRecording: () -> Unit,
     glSurfaceViewProvider: () -> GLSurfaceView
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
-        // Camera Preview Feed
         AndroidView(
             factory = { glSurfaceViewProvider() },
             modifier = Modifier.fillMaxSize()
         )
 
-        // Overlay Dashboard
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -354,21 +420,19 @@ fun CaptureScreen(
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Stats HUD
             Card(
                 colors = CardDefaults.cardColors(
-                    containerColor = Color.Black.copy(alpha = 0.6f)
+                    containerColor = Color.Black.copy(alpha = 0.65f)
                 ),
                 shape = CircleShape
             ) {
                 Text(
-                    text = if (isRecording) "Frames Logged: $frameCount" else "Ready to Capture",
+                    text = if (isRecording) "Frames Logged: $frameCount" else statusText,
                     color = Color.White,
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
                 )
             }
 
-            // Record / Stop Action Button
             Button(
                 onClick = onToggleRecording,
                 colors = ButtonDefaults.buttonColors(
