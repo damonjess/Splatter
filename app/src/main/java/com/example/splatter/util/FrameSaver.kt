@@ -25,6 +25,18 @@ object FrameSaver {
         val poseFile = File(storageDir, "pose_$timestamp.txt")
         poseFile.writeText(poseMatrix.joinToString(","))
 
+        // 1b. Save Camera Image Intrinsics
+        try {
+            val intrinsics = frame.camera.imageIntrinsics
+            val fl = intrinsics.focalLength
+            val pp = intrinsics.principalPoint
+            val dims = intrinsics.imageDimensions
+            val intrinsicsFile = File(storageDir, "intrinsics_$timestamp.txt")
+            intrinsicsFile.writeText("${fl[0]},${fl[1]},${pp[0]},${pp[1]},${dims[0]},${dims[1]}")
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not acquire camera intrinsics: ${e.message}")
+        }
+
         var rgbImage: Image? = null
         var depthImage: Image? = null
 
