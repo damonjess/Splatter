@@ -31,15 +31,15 @@ object PhotogrammetryProcessor {
     private const val TAG = "PhotoMeshProcessor"
 
     /** Max frames used to build the geometry. */
-    private const val MAX_GEOMETRY_FRAMES = 72
+    private const val MAX_GEOMETRY_FRAMES = 200
     /** Raw-depth confidence below this (0–255) is masked out before fusion. */
     private const val CONFIDENCE_THRESHOLD = 75
 
     /** Max views used for color baking (can differ from geometry frames). */
-    private const val MAX_COLOR_VIEWS = 60
+    private const val MAX_COLOR_VIEWS = 200
 
     /** Downscale factor for photos during color baking (memory + speed). */
-    private const val RGB_SAMPLE_SIZE = 2
+    private const val RGB_SAMPLE_SIZE = 1
 
     private data class FrameInfo(
         val timestamp: Long,
@@ -184,6 +184,16 @@ object PhotogrammetryProcessor {
             Log.w(TAG, "Photo mesh came out empty")
             return@withContext null
         }
+        
+        onProgress(
+            FrameProcessor.ProcessingProgress(
+                "Smoothing mesh topology...",
+                58,
+                mesh.vertexCount
+            )
+        )
+        // Smooth out the raw depth jaggedness before computing normals and baking colors
+        mesh.laplacianSmooth(iterations = 3, alpha = 0.5f)
 
         onProgress(
             FrameProcessor.ProcessingProgress(

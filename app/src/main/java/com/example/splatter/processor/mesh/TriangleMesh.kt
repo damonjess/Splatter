@@ -80,6 +80,59 @@ class TriangleMesh(
         }
         return floatArrayOf(minX, minY, minZ, maxX, maxY, maxZ)
     }
+
+    /** Simple Laplacian smoothing to reduce jagged noise from raw depth maps. */
+    fun laplacianSmooth(iterations: Int = 2, alpha: Float = 0.5f) {
+        if (iterations <= 0 || vertexCount == 0 || triangleCount == 0) return
+
+        val head = IntArray(vertexCount) { -1 }
+        val next = IntArray(triangleCount * 6)
+        val to = IntArray(triangleCount * 6)
+        var edgeCount = 0
+
+        val t = triangles
+        for (f in 0 until triangleCount) {
+            val a = t[f * 3]
+            val b = t[f * 3 + 1]
+            val cIdx = t[f * 3 + 2]
+
+            to[edgeCount] = b; next[edgeCount] = head[a]; head[a] = edgeCount++
+            to[edgeCount] = a; next[edgeCount] = head[b]; head[b] = edgeCount++
+            to[edgeCount] = cIdx; next[edgeCount] = head[b]; head[b] = edgeCount++
+            to[edgeCount] = b; next[edgeCount] = head[cIdx]; head[cIdx] = edgeCount++
+            to[edgeCount] = a; next[edgeCount] = head[cIdx]; head[cIdx] = edgeCount++
+            to[edgeCount] = cIdx; next[edgeCount] = head[a]; head[a] = edgeCount++
+        }
+
+        val p = positions
+        val newP = FloatArray(p.size)
+
+        for (iter in 0 until iterations) {
+            for (i in 0 until vertexCount) {
+                var sumX = 0f; var sumY = 0f; var sumZ = 0f
+                var count = 0
+                var e = head[i]
+                while (e != -1) {
+                    val neighbor = to[e]
+                    sumX += p[neighbor * 3]
+                    sumY += p[neighbor * 3 + 1]
+                    sumZ += p[neighbor * 3 + 2]
+                    count++
+                    e = next[e]
+                }
+
+                if (count > 0) {
+                    val inv = 1f / count
+                    newP[i * 3] = p[i * 3] + alpha * (sumX * inv - p[i * 3])
+                    newP[i * 3 + 1] = p[i * 3 + 1] + alpha * (sumY * inv - p[i * 3 + 1])
+                    newP[i * 3 + 2] = p[i * 3 + 2] + alpha * (sumZ * inv - p[i * 3 + 2])
+                } else {
+                    newP[i * 3] = p[i * 3]; newP[i * 3 + 1] = p[i * 3 + 1]; newP[i * 3 + 2] = p[i * 3 + 2]
+                }
+            }
+            System.arraycopy(newP, 0, p, 0, p.size)
+        }
+    }
 }
 
 /** Minimal growable FloatArray — avoids boxing and repeated full copies. */
