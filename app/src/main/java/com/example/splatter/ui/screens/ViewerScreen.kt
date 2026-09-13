@@ -1,10 +1,12 @@
 package com.example.splatter.ui.screens
 
 import android.content.Intent
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -39,6 +41,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
 import com.example.splatter.model.ScanSession
 import com.example.splatter.model.SplatPoint
+import com.example.splatter.processor.PlyExporter
 import com.example.splatter.ui.viewer.SplatView
 import java.io.File
 
@@ -109,34 +112,21 @@ fun ViewerScreen(
             }
 
             Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF6200EE)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF03DAC6)),
                 shape = CircleShape,
                 onClick = {
-                    session.plyFilePath?.let { path ->
-                        val file = File(path)
+                    session.getPlyFile()?.let { file ->
                         if (file.exists()) {
-                            try {
-                                val uri = FileProvider.getUriForFile(
-                                    context,
-                                    "${context.packageName}.fileprovider",
-                                    file
-                                )
-                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "application/octet-stream"
-                                    putExtra(Intent.EXTRA_STREAM, uri)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                }
-                                context.startActivity(Intent.createChooser(shareIntent, "Share PLY 3D Model"))
-                            } catch (e: Exception) {
-                                // Fallback generic share
-                            }
+                            PlyExporter.sharePlyFile(context, file, session.title)
+                        } else {
+                            Toast.makeText(context, "PLY file not found", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
             ) {
                 Text(
-                    text = "Share PLY",
-                    color = Color.White,
+                    text = "Export PLY",
+                    color = Color.Black,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
@@ -170,20 +160,43 @@ fun ViewerScreen(
                         fontWeight = FontWeight.Medium
                     )
 
-                    Button(
-                        onClick = {
-                            splatSizeMultiplier = 1.0f
-                            splatViewRef?.setSplatSizeMultiplier(1.0f)
-                            splatViewRef?.resetCamera()
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.15f)),
-                        shape = CircleShape
-                    ) {
-                        Text(
-                            text = "Reset View",
-                            color = Color.White,
-                            fontSize = 12.sp
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Button(
+                            onClick = {
+                                session.getPlyFile()?.let { file ->
+                                    if (file.exists()) {
+                                        val success = PlyExporter.exportPlyToDownloads(context, file, session.title)
+                                        if (success) {
+                                            Toast.makeText(context, "Saved PLY to Downloads/Splatter3D", Toast.LENGTH_LONG).show()
+                                        } else {
+                                            Toast.makeText(context, "Failed to save PLY", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } else {
+                                        Toast.makeText(context, "PLY file not found", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF03DAC6)),
+                            shape = CircleShape,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text("💾 Save PLY", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Button(
+                            onClick = {
+                                splatSizeMultiplier = 1.0f
+                                splatViewRef?.setSplatSizeMultiplier(1.0f)
+                                splatViewRef?.resetCamera()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.15f)),
+                            shape = CircleShape,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text("Reset View", color = Color.White, fontSize = 12.sp)
+                        }
                     }
                 }
 

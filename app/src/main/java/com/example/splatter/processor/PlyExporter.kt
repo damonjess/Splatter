@@ -1,6 +1,13 @@
 package com.example.splatter.processor
 
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
+import androidx.core.content.FileProvider
 import com.example.splatter.model.SplatPoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -219,5 +226,55 @@ object PlyExporter {
         }
 
         points
+    }
+
+    fun exportPlyToDownloads(context: Context, plyFile: File, scanTitle: String): Boolean {
+        if (!plyFile.exists()) return false
+        return try {
+            val sanitizedName = scanTitle.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val fileName = "${sanitizedName}_model.ply"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "application/x-ply")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Splatter3D")
+                }
+                val resolver = context.contentResolver
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+                    ?: return false
+                resolver.openOutputStream(uri)?.use { out ->
+                    plyFile.inputStream().use { input -> input.copyTo(out) }
+                }
+                true
+            } else {
+                val downloadsDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Splatter3D").apply { mkdirs() }
+                val destFile = File(downloadsDir, fileName)
+                plyFile.copyTo(destFile, overwrite = true)
+                true
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed exporting PLY to Downloads: ${e.message}", e)
+            false
+        }
+    }
+
+    fun sharePlyFile(context: Context, plyFile: File, scanTitle: String) {
+        if (!plyFile.exists()) return
+        try {
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                plyFile
+            )
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/x-ply"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "$scanTitle (3D PLY Model)")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(shareIntent, "Export PLY for MeshLab"))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to share PLY file: ${e.message}", e)
+        }
     }
 }

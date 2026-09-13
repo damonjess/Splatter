@@ -17,3 +17,4 @@ keystore.properties
 .externalNativeBuild
 .cxx
 local.properties
+/splatter_exports/
