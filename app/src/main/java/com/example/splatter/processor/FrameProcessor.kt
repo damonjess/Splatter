@@ -18,10 +18,10 @@ import kotlin.math.sqrt
 object FrameProcessor {
     private const val TAG = "FrameProcessor"
 
-    // Voxel size in meters for spatial downsampling (8 mm)
-    private const val VOXEL_SIZE = 0.008f
-    private const val MIN_DEPTH_METERS = 0.25f
-    private const val MAX_DEPTH_METERS = 3.5f
+    // These are now read from ScanMode — kept as fallback defaults only
+    private const val DEFAULT_VOXEL_SIZE = 0.008f
+    private const val DEFAULT_MIN_DEPTH = 0.25f
+    private const val DEFAULT_MAX_DEPTH = 3.5f
 
     data class ProcessingProgress(
         val currentStep: String,
@@ -84,8 +84,8 @@ object FrameProcessor {
             val cx = intrinsics?.getOrNull(2) ?: (imgWidth * 0.5f)
             val cy = intrinsics?.getOrNull(3) ?: (imgHeight * 0.5f)
 
-            // Step size for pixel sampling to optimize memory and processing speed
-            val step = 2
+            // Step size — use 1 for full density (every depth pixel contributes)
+            val step = 1
 
             if (depthFile.exists()) {
                 // Read exact depth dimensions saved at capture time (depthdims_*.txt)
@@ -114,7 +114,8 @@ object FrameProcessor {
                     step = step,
                     voxelGrid = voxelGrid,
                     depthWidth = depthWidth,
-                    depthHeight = depthHeight
+                    depthHeight = depthHeight,
+                    scanMode = scanMode
                 )
             } else {
                 // Fallback for frames without raw depth (e.g. estimated plane unprojection)
@@ -126,7 +127,8 @@ object FrameProcessor {
                     cx = cx,
                     cy = cy,
                     step = step * 2,
-                    voxelGrid = voxelGrid
+                    voxelGrid = voxelGrid,
+                    scanMode = scanMode
                 )
             }
 
@@ -162,7 +164,8 @@ object FrameProcessor {
         step: Int,
         voxelGrid: HashMap<Long, SplatPoint>,
         depthWidth: Int,
-        depthHeight: Int
+        depthHeight: Int,
+        scanMode: ScanMode
     ) {
         val depthBytes = depthFile.readBytes()
         if (depthBytes.isEmpty()) return
@@ -177,15 +180,27 @@ object FrameProcessor {
         val actualDepthWidth = if (depthWidth > 0) depthWidth else if (depthPixelCount == 160 * 120) 160 else if (depthPixelCount == 640 * 480) 640 else 160
         val actualDepthHeight = if (depthHeight > 0) depthHeight else (depthPixelCount / actualDepthWidth)
 
-        val depthFx = fx.coerceAtLeast(1f)
-        val depthFy = fy.coerceAtLeast(1f)
-        val depthCx = cx.coerceAtLeast(0f)
-        val depthCy = cy.coerceAtLeast(0f)
+        // CRITICAL FIX: Scale camera intrinsics to depth image resolution.
+        // The camera intrinsics (fx, fy, cx, cy) are in camera-image pixels (e.g. 1920x1080),
+        // but depth pixels are in a much smaller image (e.g. 160x120). Using the camera
+        // intrinsics directly for depth pixels produces completely wrong 3D coordinates.
+        val depthScaleX = actualDepthWidth.toFloat() / imgWidth.toFloat()
+        val depthScaleY = actualDepthHeight.toFloat() / imgHeight.toFloat()
+        val depthFx = (fx * depthScaleX).coerceAtLeast(1f)
+        val depthFy = (fy * depthScaleY).coerceAtLeast(1f)
+        val depthCx = cx * depthScaleX
+        val depthCy = cy * depthScaleY
 
-        val rgbFx = (imgWidth * 0.8f).coerceAtLeast(1f)
-        val rgbFy = (imgHeight * 0.8f).coerceAtLeast(1f)
-        val rgbCx = imgWidth * 0.5f
-        val rgbCy = imgHeight * 0.5f
+        // Use actual camera intrinsics for RGB mapping (not the old 0.8f estimate)
+        val rgbFx = fx.coerceAtLeast(1f)
+        val rgbFy = fy.coerceAtLeast(1f)
+        val rgbCx = cx
+        val rgbCy = cy
+
+        // Use scan mode's depth range and voxel size
+        val minDepth = scanMode.minDepthMeters
+        val maxDepth = scanMode.maxDepthMeters
+        val voxelSize = scanMode.voxelSizeMeters
 
         for (v in 0 until actualDepthHeight step step) {
             for (u in 0 until actualDepthWidth step step) {
@@ -196,7 +211,7 @@ object FrameProcessor {
                 if (depthMm == 0) continue
 
                 val depthMeters = depthMm / 1000.0f
-                if (depthMeters < MIN_DEPTH_METERS || depthMeters > MAX_DEPTH_METERS) continue
+                if (depthMeters < minDepth || depthMeters > maxDepth) continue
 
                 val rgbCoords = mapDepthToRgbPixel(
                     uDepth = u,
@@ -235,7 +250,7 @@ object FrameProcessor {
                 val g = ((pixelColor shr 8) and 0xFF) / 255.0f
                 val b = (pixelColor and 0xFF) / 255.0f
 
-                val voxelKey = getVoxelKey(xWorld, yWorld, zWorld, VOXEL_SIZE)
+                val voxelKey = getVoxelKey(xWorld, yWorld, zWorld, voxelSize)
 
                 if (!voxelGrid.containsKey(voxelKey)) {
                     val splat = SplatPoint(
@@ -246,9 +261,9 @@ object FrameProcessor {
                         g = g,
                         b = b,
                         alpha = 0.85f,
-                        scaleX = VOXEL_SIZE * 1.2f,
-                        scaleY = VOXEL_SIZE * 1.2f,
-                        scaleZ = VOXEL_SIZE * 1.2f
+                        scaleX = voxelSize * 1.5f,
+                        scaleY = voxelSize * 1.5f,
+                        scaleZ = voxelSize * 1.5f
                     )
                     voxelGrid[voxelKey] = splat
                 }
@@ -264,11 +279,13 @@ object FrameProcessor {
         cx: Float,
         cy: Float,
         step: Int,
-        voxelGrid: HashMap<Long, SplatPoint>
+        voxelGrid: HashMap<Long, SplatPoint>,
+        scanMode: ScanMode
     ) {
         val imgWidth = bitmap.width
         val imgHeight = bitmap.height
         val defaultDepth = 1.0f // 1 meter default plane distance
+        val voxelSize = scanMode.voxelSizeMeters
 
         for (v in 0 until imgHeight step (step * 3)) {
             for (u in 0 until imgWidth step (step * 3)) {
@@ -285,7 +302,7 @@ object FrameProcessor {
                 val g = ((pixelColor shr 8) and 0xFF) / 255.0f
                 val b = (pixelColor and 0xFF) / 255.0f
 
-                val voxelKey = getVoxelKey(xWorld, yWorld, zWorld, VOXEL_SIZE * 2f)
+                val voxelKey = getVoxelKey(xWorld, yWorld, zWorld, voxelSize * 2f)
 
                 if (!voxelGrid.containsKey(voxelKey)) {
                     voxelGrid[voxelKey] = SplatPoint(
@@ -296,9 +313,9 @@ object FrameProcessor {
                         g = g,
                         b = b,
                         alpha = 0.7f,
-                        scaleX = VOXEL_SIZE * 2f,
-                        scaleY = VOXEL_SIZE * 2f,
-                        scaleZ = VOXEL_SIZE * 2f
+                        scaleX = voxelSize * 2f,
+                        scaleY = voxelSize * 2f,
+                        scaleZ = voxelSize * 2f
                     )
                 }
             }

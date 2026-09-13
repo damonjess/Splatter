@@ -110,7 +110,7 @@ class GLSplatRenderer : GLSurfaceView.Renderer {
             void main() {
                 gl_Position = u_MVPMatrix * vec4(a_Position, 1.0);
                 float dist = max(gl_Position.w, 0.1);
-                gl_PointSize = clamp((a_Scale * u_PointSizeMult * 4800.0) / dist, 6.0, 320.0);
+                gl_PointSize = clamp((a_Scale * u_PointSizeMult * 8000.0) / dist, 12.0, 400.0);
                 v_Color = a_Color;
             }
         """.trimIndent()
@@ -127,8 +127,8 @@ class GLSplatRenderer : GLSurfaceView.Renderer {
                 if (distSq > 0.25) {
                     discard;
                 }
-                // Soft Gaussian radial falloff
-                float alpha = exp(-distSq * 6.0) * v_Color.a;
+                // Soft Gaussian radial falloff — softer to blend between neighboring splats
+                float alpha = exp(-distSq * 4.0) * v_Color.a;
                 fragColor = vec4(v_Color.rgb, alpha);
             }
         """.trimIndent()

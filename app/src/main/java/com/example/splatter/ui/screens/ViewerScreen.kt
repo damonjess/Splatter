@@ -160,44 +160,43 @@ fun ViewerScreen(
                         fontWeight = FontWeight.Medium
                     )
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Button(
-                            onClick = {
-                                session.getPlyFile()?.let { file ->
-                                    if (file.exists()) {
-                                        val success = PlyExporter.exportPlyToDownloads(context, file, session.title)
-                                        if (success) {
-                                            Toast.makeText(context, "Saved PLY to Downloads/Splatter3D", Toast.LENGTH_LONG).show()
-                                        } else {
-                                            Toast.makeText(context, "Failed to save PLY", Toast.LENGTH_SHORT).show()
-                                        }
-                                    } else {
-                                        Toast.makeText(context, "PLY file not found", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF03DAC6)),
-                            shape = CircleShape,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                        ) {
-                            Text("💾 Save PLY", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        Button(
-                            onClick = {
-                                splatSizeMultiplier = 1.0f
-                                splatViewRef?.setSplatSizeMultiplier(1.0f)
-                                splatViewRef?.resetCamera()
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.15f)),
-                            shape = CircleShape,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                        ) {
-                            Text("Reset View", color = Color.White, fontSize = 12.sp)
-                        }
+                    Button(
+                        onClick = {
+                            splatSizeMultiplier = 1.0f
+                            splatViewRef?.setSplatSizeMultiplier(1.0f)
+                            splatViewRef?.resetCamera()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.15f)),
+                        shape = CircleShape,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text("Reset View", color = Color.White, fontSize = 12.sp)
                     }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Button(
+                    onClick = {
+                        session.getPlyFile()?.let { file ->
+                            if (file.exists()) {
+                                val success = PlyExporter.exportPlyToDownloads(context, file, session.title)
+                                if (success) {
+                                    Toast.makeText(context, "Saved PLY to Downloads/Splatter3D", Toast.LENGTH_LONG).show()
+                                } else {
+                                    Toast.makeText(context, "Failed to save PLY", Toast.LENGTH_SHORT).show()
+                                }
+                            } else {
+                                Toast.makeText(context, "PLY file not found", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF03DAC6)),
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("💾 Save PLY", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
