@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -13,14 +15,34 @@ android {
         applicationId = "com.example.splatter"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1-magic8pro"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Signing secrets are kept OUT of version control: the release build reads
+    // keystore.properties (git-ignored) from the project root. Without it the app
+    // still builds — just unsigned.
+    val keystorePropertiesFile = rootProject.file("keystore.properties")
+    val hasKeystore = keystorePropertiesFile.exists()
+    val keystoreProperties = Properties().apply {
+        if (hasKeystore) keystorePropertiesFile.inputStream().use { load(it) }
+    }
+
+    signingConfigs {
+        if (hasKeystore) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
     buildTypes {
         release {
+            if (hasKeystore) signingConfig = signingConfigs.getByName("release")
             optimization {
                 enable = false
             }

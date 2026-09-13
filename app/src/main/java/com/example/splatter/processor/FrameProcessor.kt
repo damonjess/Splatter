@@ -17,7 +17,16 @@ object FrameProcessor {
     // Voxel size in meters for spatial downsampling (8 mm)
     private const val VOXEL_SIZE = 0.008f
     private const val MIN_DEPTH_METERS = 0.25f
-    private const val MAX_DEPTH_METERS = 3.5f
+    // Extended for the Magic 8 Pro's ARCore Depth API hardware (reliable raw depth)
+    private const val MAX_DEPTH_METERS = 5.0f
+    // Safety cap so extreme room-scale scans never exhaust RAM on export/viewer
+    private const val MAX_TOTAL_POINTS = 3_000_000
+
+    // Common ARCore raw-depth resolutions across certified devices
+    private val DEPTH_DIMS = listOf(
+        160 to 120, 192 to 144, 240 to 180, 256 to 192,
+        320 to 240, 384 to 288, 640 to 480, 1280 to 960
+    )
 
     data class ProcessingProgress(
         val currentStep: String,
@@ -79,12 +88,22 @@ object FrameProcessor {
             val cx = intrinsics?.getOrNull(2) ?: (imgWidth * 0.5f)
             val cy = intrinsics?.getOrNull(3) ?: (imgHeight * 0.5f)
 
-            // Step size for pixel sampling to optimize memory and processing speed
-            val step = 2
+            // Step size for pixel sampling. Magic 8 Pro has headroom for full-density
+            // sampling; step 1 = use every valid depth pixel (4x denser than stock).
+            val step = 1
 
             if (depthFile.exists()) {
+                // Exact dims saved at capture time (FrameSaver de-pads the buffer)
+                val savedDims = File(datasetDir, "depthdims_$timestamp.txt").takeIf { it.exists() }
+                    ?.readText()?.trim()?.split(",")
+                    ?.mapNotNull { it.toIntOrNull() }
+
                 // Depth-based 3D unprojection
                 processFrameWithDepth(
+                    depthDims = if (savedDims != null && savedDims.size >= 2 &&
+                        savedDims[0] * savedDims[1] * 2 == depthFile.length().toInt()) {
+                        savedDims[0] to savedDims[1]
+                    } else null,
                     depthFile = depthFile,
                     bitmap = bitmap,
                     poseMatrix = poseMatrix,
@@ -131,6 +150,7 @@ object FrameProcessor {
     }
 
     private fun processFrameWithDepth(
+        depthDims: Pair<Int, Int>? = null,
         depthFile: File,
         bitmap: Bitmap,
         poseMatrix: FloatArray,
@@ -147,12 +167,22 @@ object FrameProcessor {
         val depthBuffer = ByteBuffer.wrap(depthBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
         val depthPixelCount = depthBuffer.remaining()
 
-        // Depth dimensions (ARCore raw depth is typically 160x120 or similar aspect ratio)
+        // Depth dimensions: match against known ARCore raw-depth resolutions,
+        // otherwise assume 4:3 (the aspect ARCore raw depth uses on certified devices)
         val imgWidth = bitmap.width
         val imgHeight = bitmap.height
 
-        val depthWidth = if (depthPixelCount == 160 * 120) 160 else if (depthPixelCount == 640 * 480) 640 else 160
-        val depthHeight = if (depthWidth > 0) depthPixelCount / depthWidth else 120
+        val (depthWidth, depthHeight) = depthDims
+            ?: DEPTH_DIMS.firstOrNull { (w, h) -> w * h == depthPixelCount }
+            ?: run {
+                val w = kotlin.math.round(kotlin.math.sqrt(depthPixelCount * 4.0f / 3.0f)).toInt()
+                (w to if (w > 0) depthPixelCount / w else 0)
+            }
+        if (depthWidth <= 0 || depthHeight <= 0) return
+
+        // Bulk-read the whole RGB bitmap once (far faster than per-pixel getPixel JNI calls)
+        val rgbPixels = IntArray(imgWidth * imgHeight)
+        bitmap.getPixels(rgbPixels, 0, imgWidth, 0, 0, imgWidth, imgHeight)
 
         val scaleX = imgWidth.toFloat() / depthWidth
         val scaleY = imgHeight.toFloat() / depthHeight
@@ -187,7 +217,7 @@ object FrameProcessor {
                 // Sample RGB color from corresponding image location
                 val rgbU = (u * scaleX).toInt().coerceIn(0, imgWidth - 1)
                 val rgbV = (v * scaleY).toInt().coerceIn(0, imgHeight - 1)
-                val pixelColor = bitmap.getPixel(rgbU, rgbV)
+                val pixelColor = rgbPixels[rgbV * imgWidth + rgbU]
 
                 val r = ((pixelColor shr 16) and 0xFF) / 255.0f
                 val g = ((pixelColor shr 8) and 0xFF) / 255.0f
@@ -195,7 +225,7 @@ object FrameProcessor {
 
                 val voxelKey = getVoxelKey(xWorld, yWorld, zWorld, VOXEL_SIZE)
 
-                if (!voxelGrid.containsKey(voxelKey)) {
+                if (!voxelGrid.containsKey(voxelKey) && voxelGrid.size < MAX_TOTAL_POINTS) {
                     val splat = SplatPoint(
                         x = xWorld,
                         y = yWorld,
