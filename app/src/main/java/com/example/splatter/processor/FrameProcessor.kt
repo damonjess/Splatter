@@ -3,13 +3,17 @@ package com.example.splatter.processor
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
+import com.example.splatter.model.ScanMode
 import com.example.splatter.model.SplatPoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 object FrameProcessor {
     private const val TAG = "FrameProcessor"
@@ -27,6 +31,7 @@ object FrameProcessor {
 
     suspend fun processDataset(
         datasetDir: File,
+        scanMode: ScanMode = ScanMode.OBJECT,
         onProgress: (ProcessingProgress) -> Unit
     ): List<SplatPoint> = withContext(Dispatchers.IO) {
         onProgress(ProcessingProgress("Scanning captured dataset...", 5, 0))
@@ -147,47 +152,65 @@ object FrameProcessor {
         val depthBuffer = ByteBuffer.wrap(depthBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
         val depthPixelCount = depthBuffer.remaining()
 
-        // Depth dimensions (ARCore raw depth is typically 160x120 or similar aspect ratio)
         val imgWidth = bitmap.width
         val imgHeight = bitmap.height
 
         val depthWidth = if (depthPixelCount == 160 * 120) 160 else if (depthPixelCount == 640 * 480) 640 else 160
         val depthHeight = if (depthWidth > 0) depthPixelCount / depthWidth else 120
 
-        val scaleX = imgWidth.toFloat() / depthWidth
-        val scaleY = imgHeight.toFloat() / depthHeight
+        val depthFx = fx.coerceAtLeast(1f)
+        val depthFy = fy.coerceAtLeast(1f)
+        val depthCx = cx.coerceAtLeast(0f)
+        val depthCy = cy.coerceAtLeast(0f)
 
-        val scaleFx = fx * (depthWidth.toFloat() / imgWidth)
-        val scaleFy = fy * (depthHeight.toFloat() / imgHeight)
-        val scaleCx = cx * (depthWidth.toFloat() / imgWidth)
-        val scaleCy = cy * (depthHeight.toFloat() / imgHeight)
+        val rgbFx = (imgWidth * 0.8f).coerceAtLeast(1f)
+        val rgbFy = (imgHeight * 0.8f).coerceAtLeast(1f)
+        val rgbCx = imgWidth * 0.5f
+        val rgbCy = imgHeight * 0.5f
 
         for (v in 0 until depthHeight step step) {
             for (u in 0 until depthWidth step step) {
                 val index = v * depthWidth + u
                 if (index >= depthPixelCount) continue
 
-                // 16-bit depth in millimeters
                 val depthMm = depthBuffer.get(index).toInt() and 0xFFFF
                 if (depthMm == 0) continue
 
                 val depthMeters = depthMm / 1000.0f
                 if (depthMeters < MIN_DEPTH_METERS || depthMeters > MAX_DEPTH_METERS) continue
 
-                // Unproject 2D depth pixel to 3D camera coordinates
-                val xCam = (u - scaleCx) * depthMeters / scaleFx
-                val yCam = (v - scaleCy) * depthMeters / scaleFy
+                val rgbCoords = mapDepthToRgbPixel(
+                    uDepth = u,
+                    vDepth = v,
+                    depthWidth = depthWidth,
+                    depthHeight = depthHeight,
+                    depthFx = depthFx,
+                    depthFy = depthFy,
+                    depthCx = depthCx,
+                    depthCy = depthCy,
+                    rgbWidth = imgWidth,
+                    rgbHeight = imgHeight,
+                    rgbFx = rgbFx,
+                    rgbFy = rgbFy,
+                    rgbCx = rgbCx,
+                    rgbCy = rgbCy,
+                    rotationDegrees = 0,
+                    cropX = 0f,
+                    cropY = 0f,
+                    distortionK1 = 0.0f
+                )
+
+                val rgbU = rgbCoords.first.coerceIn(0, imgWidth - 1)
+                val rgbV = rgbCoords.second.coerceIn(0, imgHeight - 1)
+                val pixelColor = bitmap.getPixel(rgbU, rgbV)
+
+                val xCam = (u - depthCx) * depthMeters / depthFx
+                val yCam = (v - depthCy) * depthMeters / depthFy
                 val zCam = depthMeters
 
-                // Transform by camera pose matrix into world space
                 val xWorld = poseMatrix[0] * xCam + poseMatrix[4] * yCam + poseMatrix[8] * zCam + poseMatrix[12]
                 val yWorld = poseMatrix[1] * xCam + poseMatrix[5] * yCam + poseMatrix[9] * zCam + poseMatrix[13]
                 val zWorld = poseMatrix[2] * xCam + poseMatrix[6] * yCam + poseMatrix[10] * zCam + poseMatrix[14]
-
-                // Sample RGB color from corresponding image location
-                val rgbU = (u * scaleX).toInt().coerceIn(0, imgWidth - 1)
-                val rgbV = (v * scaleY).toInt().coerceIn(0, imgHeight - 1)
-                val pixelColor = bitmap.getPixel(rgbU, rgbV)
 
                 val r = ((pixelColor shr 16) and 0xFF) / 255.0f
                 val g = ((pixelColor shr 8) and 0xFF) / 255.0f
@@ -270,6 +293,49 @@ object FrameProcessor {
 
         // 64-bit spatial hash key mapping 3D voxel coordinates
         return (vx and 0x1FFFFFL) or ((vy and 0x1FFFFFL) shl 21) or ((vz and 0x1FFFFFL) shl 42)
+    }
+
+    fun mapDepthToRgbPixel(
+        uDepth: Int,
+        vDepth: Int,
+        depthWidth: Int,
+        depthHeight: Int,
+        depthFx: Float,
+        depthFy: Float,
+        depthCx: Float,
+        depthCy: Float,
+        rgbWidth: Int,
+        rgbHeight: Int,
+        rgbFx: Float,
+        rgbFy: Float,
+        rgbCx: Float,
+        rgbCy: Float,
+        rotationDegrees: Int,
+        cropX: Float,
+        cropY: Float,
+        distortionK1: Float
+    ): Pair<Int, Int> {
+        val normalizedX = (uDepth - depthCx) / depthFx
+        val normalizedY = (vDepth - depthCy) / depthFy
+
+        val r2 = normalizedX * normalizedX + normalizedY * normalizedY
+        val radial = 1.0f + distortionK1 * r2
+        val undistortedX = normalizedX * radial
+        val undistortedY = normalizedY * radial
+
+        val angle = Math.toRadians(rotationDegrees.toDouble())
+        val cos = cos(angle).toFloat()
+        val sin = sin(angle).toFloat()
+
+        val rotatedX = undistortedX * cos - undistortedY * sin
+        val rotatedY = undistortedX * sin + undistortedY * cos
+
+        val rgbX = rgbCx + rotatedX * rgbFx + cropX
+        val rgbY = rgbCy + rotatedY * rgbFy + cropY
+
+        val x = rgbX.roundToInt().coerceIn(0, rgbWidth - 1)
+        val y = rgbY.roundToInt().coerceIn(0, rgbHeight - 1)
+        return x to y
     }
 
     private fun parsePoseMatrix(poseFile: File): FloatArray? {

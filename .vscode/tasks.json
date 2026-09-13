@@ -1,0 +1,71 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Gradle: installDebug",
+      "type": "shell",
+      "command": "./gradlew",
+      "args": [
+        "installDebug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Gradle: assembleDebug",
+      "type": "shell",
+      "command": "./gradlew",
+      "args": [
+        "assembleDebug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Gradle: clean",
+      "type": "shell",
+      "command": "./gradlew",
+      "args": [
+        "clean"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "ADB: devices",
+      "type": "shell",
+      "command": "adb",
+      "args": [
+        "devices"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "ADB: logcat",
+      "type": "shell",
+      "command": "adb",
+      "args": [
+        "logcat"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "test",
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}

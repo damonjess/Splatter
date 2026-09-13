@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,11 +31,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.splatter.model.ScanMode
+import com.example.splatter.model.ScanQualityState
 
 @Composable
 fun ScanScreen(
@@ -43,6 +46,7 @@ fun ScanScreen(
     isRecording: Boolean,
     frameCount: Int,
     statusText: String,
+    scanQuality: ScanQualityState,
     onToggleRecording: () -> Unit,
     onBackClicked: () -> Unit,
     glSurfaceViewProvider: () -> GLSurfaceView
@@ -108,6 +112,115 @@ fun ScanScreen(
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Medium
                         )
+                    }
+                }
+            }
+
+            if (isRecording) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.72f)),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp)
+                    ) {
+                        Text(
+                            text = "LIVE SCAN QUALITY",
+                            color = Color.White.copy(alpha = 0.6f),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        val metricColor = if (scanQuality.tracking == "Good") Color(0xFF4CAF50) else Color(0xFFFFC107)
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Tracking: ${scanQuality.tracking}", color = metricColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text("Depth coverage: ${scanQuality.depthCoveragePercent}%", color = Color.White, fontSize = 12.sp)
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Motion: ${scanQuality.motion}", color = Color.White, fontSize = 12.sp)
+                            Text("Distance: ${"%.1f".format(scanQuality.distanceMeters)} m", color = Color.White, fontSize = 12.sp)
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Frames: ${scanQuality.frameCount}", color = Color.White, fontSize = 12.sp)
+                            Text("Points: ${scanQuality.pointCount}", color = Color.White, fontSize = 12.sp)
+                        }
+
+                        if (scanQuality.warnings.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = scanQuality.warnings.joinToString(" • "),
+                                color = Color(0xFFFFB74D),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+
+                        if (selectedMode == ScanMode.ROOM && scanQuality.coverageCells.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(12.dp))
+                                    .padding(8.dp)
+                            ) {
+                                Text(
+                                    text = "Coverage map",
+                                    color = Color.White.copy(alpha = 0.75f),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.8.sp
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    val gridCells = List(25) { index ->
+                                        val row = index / 5
+                                        val col = index % 5
+                                        val isCovered = scanQuality.coverageCells.any { cell ->
+                                            val rowMatch = ((cell.y * 5f).toInt()) == row
+                                            val colMatch = ((cell.x * 5f).toInt()) == col
+                                            rowMatch && colMatch
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(12.dp)
+                                                .background(
+                                                    if (isCovered) Color(0xFF4CAF50) else Color.White.copy(alpha = 0.12f),
+                                                    RoundedCornerShape(2.dp)
+                                                )
+                                        )
+                                    }
+                                    gridCells.forEach { it }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -236,17 +349,15 @@ fun ScanScreen(
                     // Scan Guidance Prompt
                     Text(
                         text = if (isRecording) {
-                            if (selectedMode == ScanMode.OBJECT) "Move slowly around target object..."
-                            else "Slowly scan walls, floor & room layout..."
-                        } else {
-                            if (selectedMode == ScanMode.OBJECT) "Point at object (0.3–2.5m) and tap REC"
-                            else "Point around room (0.5–5.0m) and tap REC"
-                        },
-                        color = Color.White.copy(alpha = 0.85f),
-                        fontSize = 13.sp
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
+                                if (selectedMode == ScanMode.OBJECT) "Move slowly around target object..."
+                                else "Slowly scan walls, floor & room layout..."
+                            } else {
+                                if (selectedMode == ScanMode.OBJECT) "Point at object (0.3–2.5m) and tap REC"
+                                else "Point around room (0.5–5.0m) and tap REC"
+                            },
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 13.sp
+                        )
 
                     // Record / Stop Action Button
                     Row(

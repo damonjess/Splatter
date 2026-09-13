@@ -31,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.splatter.model.ScanMode
+import com.example.splatter.model.ScanQualityState
 import com.example.splatter.model.ScanSession
 import com.example.splatter.model.SplatPoint
 import com.example.splatter.processor.FrameProcessor
@@ -41,6 +42,7 @@ import com.example.splatter.ui.screens.ProcessingScreen
 import com.example.splatter.ui.screens.ScanScreen
 import com.example.splatter.ui.screens.ViewerScreen
 import com.example.splatter.util.FrameSaver
+import com.example.splatter.util.ScanQualityEvaluator
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Coordinates2d
@@ -75,8 +77,11 @@ class MainActivity : ComponentActivity() {
     private val isRecordingState = mutableStateOf(false)
     private val frameCountState = mutableStateOf(0)
     private val trackingStatusText = mutableStateOf("Initializing AR...")
+    private val scanQualityState = mutableStateOf(ScanQualityState())
 
     private var currentActiveSession: ScanSession? = null
+    private var lastCameraPosition: FloatArray? = null
+    private var scanStartedAtMs: Long = 0L
 
     private var lastSavedTimestampMs = 0L
     // Tuned for HONOR Magic 8 Pro (flagship SoC + UFS storage): ~10 captures per second
@@ -191,10 +196,14 @@ class MainActivity : ComponentActivity() {
                         isRecording = isRecordingState.value,
                         frameCount = frameCountState.value,
                         statusText = trackingStatusText.value,
+                        scanQuality = scanQualityState.value,
                         onToggleRecording = {
                             val willRecord = !isRecordingState.value
                             if (willRecord) {
                                 frameCountState.value = 0
+                                scanStartedAtMs = System.currentTimeMillis()
+                                lastCameraPosition = null
+                                scanQualityState.value = ScanQualityState(frameCount = 0)
                                 isRecordingState.value = true
                             } else {
                                 // STOP recording and process session
@@ -501,6 +510,31 @@ class MainActivity : ComponentActivity() {
                     0
                 }
 
+                val depthCoveragePercent = estimateDepthCoveragePercent(frame)
+                val brightness = estimateBrightness(frame)
+                val distanceMeters = estimateDistanceMeters(frame)
+                val currentPose = frame.camera.pose.translation
+                val motionMetersPerFrame = if (lastCameraPosition != null) {
+                    val dx = currentPose[0] - lastCameraPosition!![0]
+                    val dy = currentPose[1] - lastCameraPosition!![1]
+                    val dz = currentPose[2] - lastCameraPosition!![2]
+                    kotlin.math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
+                } else 0f
+                lastCameraPosition = currentPose.clone()
+
+                val quality = ScanQualityEvaluator.evaluateLive(
+                    trackingState = trackingState,
+                    motionMetersPerFrame = motionMetersPerFrame,
+                    distanceMeters = distanceMeters,
+                    depthCoveragePercent = depthCoveragePercent,
+                    brightness = brightness,
+                    frameCount = frameCountState.value,
+                    elapsedRecordingMs = System.currentTimeMillis() - scanStartedAtMs,
+                    scanMode = currentActiveSession?.scanMode ?: ScanMode.OBJECT,
+                    storageLow = false,
+                    previouslyScannedAreaDetected = false
+                )
+
                 runOnUiThread {
                     trackingStatusText.value = when (trackingState) {
                         TrackingState.TRACKING -> {
@@ -514,6 +548,10 @@ class MainActivity : ComponentActivity() {
                         TrackingState.PAUSED -> "Searching for features... (Move slowly)"
                         TrackingState.STOPPED -> "Tracking Stopped"
                     }
+                    scanQualityState.value = quality.copy(
+                        frameCount = frameCountState.value,
+                        pointCount = (quality.pointCount.coerceAtLeast(0))
+                    )
                 }
 
                 // CRITICAL FIX: Only save frames when tracking is actively TRACKING
@@ -532,6 +570,66 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 Log.w(TAG, "Frame render loop skipped: ${e.message}")
             }
+        }
+    }
+
+    private fun estimateDepthCoveragePercent(frame: com.google.ar.core.Frame): Int {
+        return try {
+            val depthImage = frame.acquireRawDepthImage16Bits()
+            val depthBuffer = depthImage.planes[0].buffer
+            val totalPixels = depthImage.width * depthImage.height
+            val shortBuffer = depthBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            var validPixels = 0
+            for (i in 0 until shortBuffer.remaining()) {
+                val depthMm = shortBuffer.get(i).toInt() and 0xFFFF
+                if (depthMm > 0) validPixels++
+            }
+            depthImage.close()
+            ((validPixels.toFloat() / totalPixels.toFloat()) * 100f).toInt().coerceIn(0, 100)
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    private fun estimateBrightness(frame: com.google.ar.core.Frame): Float {
+        return try {
+            val image = frame.acquireCameraImage()
+            val yPlane = image.planes[0]
+            val buffer = yPlane.buffer
+            val bytes = ByteArray(buffer.remaining())
+            buffer.get(bytes)
+            var sum = 0
+            var count = 0
+            val step = maxOf(1, bytes.size / 2048)
+            for (i in bytes.indices step step) {
+                sum += (bytes[i].toInt() and 0xFF)
+                count++
+            }
+            image.close()
+            if (count == 0) 80f else (sum / count.toFloat())
+        } catch (_: Exception) {
+            80f
+        }
+    }
+
+    private fun estimateDistanceMeters(frame: com.google.ar.core.Frame): Float {
+        return try {
+            val depthImage = frame.acquireRawDepthImage16Bits()
+            val depthBuffer = depthImage.planes[0].buffer
+            val shortBuffer = depthBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            var sumDepthMm = 0
+            var validPixels = 0
+            for (i in 0 until shortBuffer.remaining()) {
+                val depthMm = shortBuffer.get(i).toInt() and 0xFFFF
+                if (depthMm > 0) {
+                    sumDepthMm += depthMm
+                    validPixels++
+                }
+            }
+            depthImage.close()
+            if (validPixels == 0) 1.2f else (sumDepthMm.toFloat() / validPixels.toFloat()) / 1000f
+        } catch (_: Exception) {
+            1.2f
         }
     }
 

@@ -1,0 +1,12 @@
+{
+  "java.configuration.updateBuildConfiguration": "automatic",
+  "gradle.nestedProjects": true,
+  "files.exclude": {
+    "**/.gradle": true,
+    "**/build": true
+  },
+  "search.exclude": {
+    "**/.gradle": true,
+    "**/build": true
+  }
+}
