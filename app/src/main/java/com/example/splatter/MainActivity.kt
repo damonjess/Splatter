@@ -36,6 +36,7 @@ import com.example.splatter.model.ScanSession
 import com.example.splatter.model.SplatPoint
 import com.example.splatter.processor.FrameProcessor
 import com.example.splatter.processor.PlyExporter
+import com.example.splatter.processor.RoomReconstructionProcessor
 import com.example.splatter.repository.ScanRepository
 import com.example.splatter.ui.screens.GalleryScreen
 import com.example.splatter.ui.screens.ProcessingScreen
@@ -229,6 +230,16 @@ class MainActivity : ComponentActivity() {
 
                                     val splatFile = File(recordingSession.datasetDirPath, "model.splat")
                                     PlyExporter.exportToSplat(points, splatFile)
+
+                                    val reconstructedPlanes = RoomReconstructionProcessor.extractPlanes(points)
+                                    val planeObj = File(recordingSession.datasetDirPath, "room_planes.obj")
+                                    planeObj.writeText(RoomReconstructionProcessor.exportPlanesAsObj(reconstructedPlanes))
+                                    val planeSummary = File(recordingSession.datasetDirPath, "room_planes.txt")
+                                    planeSummary.writeText(
+                                        reconstructedPlanes.joinToString("\n") { plane ->
+                                            "${plane.type.name}: center=(${plane.centerX}, ${plane.centerY}, ${plane.centerZ}), normal=(${plane.normalX}, ${plane.normalY}, ${plane.normalZ}), inliers=${plane.inlierCount}"
+                                        }
+                                    )
 
                                     // Grab the first captured RGB frame as a thumbnail
                                     val datasetDir = File(recordingSession.datasetDirPath)
