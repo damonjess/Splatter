@@ -56,14 +56,41 @@ object FrameSaver {
                 null
             }
 
-            // 3. Save Raw Depth Buffer
+            // 3. Save Raw Depth Buffer (de-padded to exactly width*height*2 bytes)
             depthImage?.let { depth ->
+                val depthWidth = depth.width
+                val depthHeight = depth.height
                 val depthBuffer = depth.planes[0].buffer
-                val depthBytes = ByteArray(depthBuffer.remaining())
-                depthBuffer.get(depthBytes)
+                val rowStride = depth.planes[0].rowStride
+                val pixelStride = depth.planes[0].pixelStride
+
+                val depthBytes = if (pixelStride == 2 && rowStride == depthWidth * 2) {
+                    // Tightly packed: copy directly
+                    ByteArray(depthBuffer.remaining()).also { depthBuffer.get(it) }
+                } else {
+                    // Row-stride padding present: strip it row by row
+                    val limit = depthBuffer.remaining()
+                    val out = ByteArray(depthWidth * depthHeight * 2)
+                    for (row in 0 until depthHeight) {
+                        val rowStart = row * rowStride
+                        for (col in 0 until depthWidth) {
+                            val srcIdx = rowStart + col * pixelStride
+                            if (srcIdx + 1 >= limit) break
+                            depthBuffer.position(srcIdx)
+                            val dst = (row * depthWidth + col) * 2
+                            out[dst] = depthBuffer.get()
+                            out[dst + 1] = depthBuffer.get()
+                        }
+                    }
+                    out
+                }
 
                 val depthFile = File(storageDir, "depth_$timestamp.raw")
                 depthFile.writeBytes(depthBytes)
+
+                // Persist exact depth dimensions so processing never has to guess
+                val dimsFile = File(storageDir, "depthdims_$timestamp.txt")
+                dimsFile.writeText("$depthWidth,$depthHeight")
             }
 
             confidenceImage?.let { conf ->

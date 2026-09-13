@@ -79,10 +79,13 @@ class MainActivity : ComponentActivity() {
     private var currentActiveSession: ScanSession? = null
 
     private var lastSavedTimestampMs = 0L
-    private val captureIntervalMs = 150L // ~6-7 captures per second
+    // Tuned for HONOR Magic 8 Pro (flagship SoC + UFS storage): ~10 captures per second
+    private val captureIntervalMs = 100L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Keep the screen awake while scanning/viewing (personal scanning device)
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         repository = ScanRepository(applicationContext)
 
         setContent {
