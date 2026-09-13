@@ -13,7 +13,6 @@ import java.nio.ByteOrder
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
-import kotlin.math.sqrt
 
 object FrameProcessor {
     private const val TAG = "FrameProcessor"
@@ -22,6 +21,11 @@ object FrameProcessor {
     private const val DEFAULT_VOXEL_SIZE = 0.008f
     private const val DEFAULT_MIN_DEPTH = 0.25f
     private const val DEFAULT_MAX_DEPTH = 3.5f
+
+    // Downscale RGB bitmaps during processing to reduce memory pressure.
+    // A 1920x1080 ARGB_8888 bitmap is ~8 MB; with sampleSize=2 it becomes ~2 MB.
+    // Color accuracy impact is negligible for splat generation.
+    private const val RGB_SAMPLE_SIZE = 2
 
     data class ProcessingProgress(
         val currentStep: String,
@@ -33,12 +37,12 @@ object FrameProcessor {
         datasetDir: File,
         scanMode: ScanMode = ScanMode.OBJECT,
         onProgress: (ProcessingProgress) -> Unit
-    ): List<SplatPoint> = withContext(Dispatchers.IO) {
+    ): MutableList<SplatPoint> = withContext(Dispatchers.IO) {
         onProgress(ProcessingProgress("Scanning captured dataset...", 5, 0))
 
         if (!datasetDir.exists() || !datasetDir.isDirectory) {
             Log.e(TAG, "Dataset directory does not exist: ${datasetDir.absolutePath}")
-            return@withContext emptyList()
+            return@withContext mutableListOf()
         }
 
         // Find all pose files
@@ -49,11 +53,12 @@ object FrameProcessor {
 
         if (poseFiles.isEmpty()) {
             Log.w(TAG, "No pose files found in dataset directory.")
-            return@withContext emptyList()
+            return@withContext mutableListOf()
         }
 
         val totalFrames = poseFiles.size
-        Log.i(TAG, "Processing $totalFrames recorded AR frames...")
+        val maxPoints = scanMode.maxPointLimit
+        Log.i(TAG, "Processing $totalFrames recorded AR frames (maxPoints=$maxPoints)...")
 
         // Voxel Grid spatial hash map to merge overlapping 3D points
         val voxelGrid = HashMap<Long, SplatPoint>()
@@ -74,65 +79,89 @@ object FrameProcessor {
             // 2. Read Intrinsics (fx, fy, cx, cy, width, height)
             val intrinsics = parseIntrinsics(intrinsicsFile)
 
-            // 3. Load RGB Bitmap
-            val bitmap = BitmapFactory.decodeFile(rgbFile.absolutePath) ?: continue
-            val imgWidth = bitmap.width
-            val imgHeight = bitmap.height
+            // 3. Load RGB Bitmap (downscaled to reduce memory pressure)
+            val (bitmap, origImgDims) = try {
+                loadSampledBitmap(rgbFile, RGB_SAMPLE_SIZE) ?: continue
+            } catch (e: OutOfMemoryError) {
+                Log.e(TAG, "OOM loading bitmap for frame ${index + 1}, skipping", e)
+                System.gc()
+                continue
+            }
+            val origImgWidth = origImgDims.first
+            val origImgHeight = origImgDims.second
 
-            val fx = intrinsics?.getOrNull(0) ?: (imgWidth * 0.8f)
-            val fy = intrinsics?.getOrNull(1) ?: (imgHeight * 0.8f)
-            val cx = intrinsics?.getOrNull(2) ?: (imgWidth * 0.5f)
-            val cy = intrinsics?.getOrNull(3) ?: (imgHeight * 0.5f)
+            val fx = intrinsics?.getOrNull(0) ?: (origImgWidth * 0.8f)
+            val fy = intrinsics?.getOrNull(1) ?: (origImgHeight * 0.8f)
+            val cx = intrinsics?.getOrNull(2) ?: (origImgWidth * 0.5f)
+            val cy = intrinsics?.getOrNull(3) ?: (origImgHeight * 0.5f)
 
             // Step size — use 1 for full density (every depth pixel contributes)
             val step = 1
 
-            if (depthFile.exists()) {
-                // Read exact depth dimensions saved at capture time (depthdims_*.txt)
-                // Falls back to pixel-count heuristic only if the file is missing
-                val depthDimsFile = File(datasetDir, "depthdims_$timestamp.txt")
-                var depthWidth = 0
-                var depthHeight = 0
-                if (depthDimsFile.exists()) {
-                    try {
-                        val dimsParts = depthDimsFile.readText().trim().split(",")
-                        if (dimsParts.size >= 2) {
-                            depthWidth = dimsParts[0].trim().toIntOrNull() ?: 0
-                            depthHeight = dimsParts[1].trim().toIntOrNull() ?: 0
-                        }
-                    } catch (_: Exception) { }
+            try {
+                if (depthFile.exists()) {
+                    // Read exact depth dimensions saved at capture time (depthdims_*.txt)
+                    // Falls back to pixel-count heuristic only if the file is missing
+                    val depthDimsFile = File(datasetDir, "depthdims_$timestamp.txt")
+                    var depthWidth = 0
+                    var depthHeight = 0
+                    if (depthDimsFile.exists()) {
+                        try {
+                            val dimsParts = depthDimsFile.readText().trim().split(",")
+                            if (dimsParts.size >= 2) {
+                                depthWidth = dimsParts[0].trim().toIntOrNull() ?: 0
+                                depthHeight = dimsParts[1].trim().toIntOrNull() ?: 0
+                            }
+                        } catch (_: Exception) { }
+                    }
+                    // Depth-based 3D unprojection (processFrameWithDepth has its own fallback if depth dims are 0)
+                    processFrameWithDepth(
+                        depthFile = depthFile,
+                        bitmap = bitmap,
+                        origImgWidth = origImgWidth,
+                        origImgHeight = origImgHeight,
+                        poseMatrix = poseMatrix,
+                        fx = fx,
+                        fy = fy,
+                        cx = cx,
+                        cy = cy,
+                        step = step,
+                        voxelGrid = voxelGrid,
+                        depthWidth = depthWidth,
+                        depthHeight = depthHeight,
+                        scanMode = scanMode,
+                        maxPoints = maxPoints
+                    )
+                } else {
+                    // Fallback for frames without raw depth (e.g. estimated plane unprojection)
+                    processFrameWithoutDepth(
+                        bitmap = bitmap,
+                        origImgWidth = origImgWidth,
+                        origImgHeight = origImgHeight,
+                        poseMatrix = poseMatrix,
+                        fx = fx,
+                        fy = fy,
+                        cx = cx,
+                        cy = cy,
+                        step = step * 2,
+                        voxelGrid = voxelGrid,
+                        scanMode = scanMode,
+                        maxPoints = maxPoints
+                    )
                 }
-                // Depth-based 3D unprojection (processFrameWithDepth has its own fallback if depth dims are 0)
-                processFrameWithDepth(
-                    depthFile = depthFile,
-                    bitmap = bitmap,
-                    poseMatrix = poseMatrix,
-                    fx = fx,
-                    fy = fy,
-                    cx = cx,
-                    cy = cy,
-                    step = step,
-                    voxelGrid = voxelGrid,
-                    depthWidth = depthWidth,
-                    depthHeight = depthHeight,
-                    scanMode = scanMode
-                )
-            } else {
-                // Fallback for frames without raw depth (e.g. estimated plane unprojection)
-                processFrameWithoutDepth(
-                    bitmap = bitmap,
-                    poseMatrix = poseMatrix,
-                    fx = fx,
-                    fy = fy,
-                    cx = cx,
-                    cy = cy,
-                    step = step * 2,
-                    voxelGrid = voxelGrid,
-                    scanMode = scanMode
-                )
+            } catch (e: OutOfMemoryError) {
+                Log.e(TAG, "OOM processing frame ${index + 1}/${totalFrames}, continuing with ${voxelGrid.size} points so far", e)
+                System.gc()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error processing frame ${index + 1}/${totalFrames}: ${e.message}", e)
+            } finally {
+                bitmap.recycle()
             }
 
-            bitmap.recycle()
+            // Early exit if we've hit the point cap — no need to process remaining frames
+            if (voxelGrid.size >= maxPoints) {
+                Log.i(TAG, "Point cap ($maxPoints) reached after frame ${index + 1}/$totalFrames, skipping remaining frames")
+            }
 
             val percent = 10 + ((index + 1).toFloat() / totalFrames * 70).roundToInt()
             onProgress(
@@ -146,7 +175,7 @@ object FrameProcessor {
 
         onProgress(ProcessingProgress("Applying 3D Gaussian spatial smoothing...", 85, voxelGrid.size))
 
-        val points = voxelGrid.values.toList()
+        val points = ArrayList(voxelGrid.values)
         Log.i(TAG, "Finished processing. Total Gaussians generated: ${points.size}")
 
         onProgress(ProcessingProgress("Finalizing 3D Splat representation...", 95, points.size))
@@ -156,6 +185,8 @@ object FrameProcessor {
     private fun processFrameWithDepth(
         depthFile: File,
         bitmap: Bitmap,
+        origImgWidth: Int,
+        origImgHeight: Int,
         poseMatrix: FloatArray,
         fx: Float,
         fy: Float,
@@ -165,7 +196,8 @@ object FrameProcessor {
         voxelGrid: HashMap<Long, SplatPoint>,
         depthWidth: Int,
         depthHeight: Int,
-        scanMode: ScanMode
+        scanMode: ScanMode,
+        maxPoints: Int
     ) {
         val depthBytes = depthFile.readBytes()
         if (depthBytes.isEmpty()) return
@@ -173,8 +205,8 @@ object FrameProcessor {
         val depthBuffer = ByteBuffer.wrap(depthBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
         val depthPixelCount = depthBuffer.remaining()
 
-        val imgWidth = bitmap.width
-        val imgHeight = bitmap.height
+        val bitmapWidth = bitmap.width
+        val bitmapHeight = bitmap.height
 
         // Use the exact depth dimensions passed in (from depthdims_*.txt or fallback)
         val actualDepthWidth = if (depthWidth > 0) depthWidth else if (depthPixelCount == 160 * 120) 160 else if (depthPixelCount == 640 * 480) 640 else 160
@@ -184,28 +216,42 @@ object FrameProcessor {
         // The camera intrinsics (fx, fy, cx, cy) are in camera-image pixels (e.g. 1920x1080),
         // but depth pixels are in a much smaller image (e.g. 160x120). Using the camera
         // intrinsics directly for depth pixels produces completely wrong 3D coordinates.
-        val depthScaleX = actualDepthWidth.toFloat() / imgWidth.toFloat()
-        val depthScaleY = actualDepthHeight.toFloat() / imgHeight.toFloat()
+        // Use original image dimensions (not downscaled bitmap) for depth scaling.
+        val depthScaleX = actualDepthWidth.toFloat() / origImgWidth.toFloat()
+        val depthScaleY = actualDepthHeight.toFloat() / origImgHeight.toFloat()
         val depthFx = (fx * depthScaleX).coerceAtLeast(1f)
         val depthFy = (fy * depthScaleY).coerceAtLeast(1f)
         val depthCx = cx * depthScaleX
         val depthCy = cy * depthScaleY
 
-        // Use actual camera intrinsics for RGB mapping (not the old 0.8f estimate)
-        val rgbFx = fx.coerceAtLeast(1f)
-        val rgbFy = fy.coerceAtLeast(1f)
-        val rgbCx = cx
-        val rgbCy = cy
+        // Scale RGB intrinsics to the downscaled bitmap's coordinate space.
+        // The bitmap may be smaller than the original camera image (due to RGB_SAMPLE_SIZE),
+        // so intrinsics must be scaled to match the bitmap dimensions for correct pixel lookup.
+        val bitmapScaleX = bitmapWidth.toFloat() / origImgWidth.toFloat()
+        val bitmapScaleY = bitmapHeight.toFloat() / origImgHeight.toFloat()
+        val rgbFx = (fx * bitmapScaleX).coerceAtLeast(1f)
+        val rgbFy = (fy * bitmapScaleY).coerceAtLeast(1f)
+        val rgbCx = cx * bitmapScaleX
+        val rgbCy = cy * bitmapScaleY
 
         // Use scan mode's depth range and voxel size
         val minDepth = scanMode.minDepthMeters
         val maxDepth = scanMode.maxDepthMeters
         val voxelSize = scanMode.voxelSizeMeters
 
+        // Batch-extract all bitmap pixels into an IntArray for fast access.
+        // This replaces thousands of JNI-heavy bitmap.getPixel() calls per frame
+        // with a single bulk transfer followed by cheap array indexing.
+        val pixels = IntArray(bitmapWidth * bitmapHeight)
+        bitmap.getPixels(pixels, 0, bitmapWidth, 0, 0, bitmapWidth, bitmapHeight)
+
         for (v in 0 until actualDepthHeight step step) {
             for (u in 0 until actualDepthWidth step step) {
                 val index = v * actualDepthWidth + u
                 if (index >= depthPixelCount) continue
+
+                // Stop adding points once we hit the cap — prevents OOM from unbounded grid growth
+                if (voxelGrid.size >= maxPoints) return
 
                 val depthMm = depthBuffer.get(index).toInt() and 0xFFFF
                 if (depthMm == 0) continue
@@ -222,8 +268,8 @@ object FrameProcessor {
                     depthFy = depthFy,
                     depthCx = depthCx,
                     depthCy = depthCy,
-                    rgbWidth = imgWidth,
-                    rgbHeight = imgHeight,
+                    rgbWidth = bitmapWidth,
+                    rgbHeight = bitmapHeight,
                     rgbFx = rgbFx,
                     rgbFy = rgbFy,
                     rgbCx = rgbCx,
@@ -234,9 +280,9 @@ object FrameProcessor {
                     distortionK1 = 0.0f
                 )
 
-                val rgbU = rgbCoords.first.coerceIn(0, imgWidth - 1)
-                val rgbV = rgbCoords.second.coerceIn(0, imgHeight - 1)
-                val pixelColor = bitmap.getPixel(rgbU, rgbV)
+                val rgbU = rgbCoords.first.coerceIn(0, bitmapWidth - 1)
+                val rgbV = rgbCoords.second.coerceIn(0, bitmapHeight - 1)
+                val pixelColor = pixels[rgbV * bitmapWidth + rgbU]
 
                 val xCam = (u - depthCx) * depthMeters / depthFx
                 val yCam = (v - depthCy) * depthMeters / depthFy
@@ -273,6 +319,8 @@ object FrameProcessor {
 
     private fun processFrameWithoutDepth(
         bitmap: Bitmap,
+        origImgWidth: Int,
+        origImgHeight: Int,
         poseMatrix: FloatArray,
         fx: Float,
         fy: Float,
@@ -280,24 +328,39 @@ object FrameProcessor {
         cy: Float,
         step: Int,
         voxelGrid: HashMap<Long, SplatPoint>,
-        scanMode: ScanMode
+        scanMode: ScanMode,
+        maxPoints: Int
     ) {
-        val imgWidth = bitmap.width
-        val imgHeight = bitmap.height
+        val bitmapWidth = bitmap.width
+        val bitmapHeight = bitmap.height
         val defaultDepth = 1.0f // 1 meter default plane distance
         val voxelSize = scanMode.voxelSizeMeters
 
-        for (v in 0 until imgHeight step (step * 3)) {
-            for (u in 0 until imgWidth step (step * 3)) {
-                val xCam = (u - cx) * defaultDepth / fx
-                val yCam = (v - cy) * defaultDepth / fy
+        // Scale intrinsics to bitmap coordinate space
+        val bitmapScaleX = bitmapWidth.toFloat() / origImgWidth.toFloat()
+        val bitmapScaleY = bitmapHeight.toFloat() / origImgHeight.toFloat()
+        val scaledFx = (fx * bitmapScaleX).coerceAtLeast(1f)
+        val scaledFy = (fy * bitmapScaleY).coerceAtLeast(1f)
+        val scaledCx = cx * bitmapScaleX
+        val scaledCy = cy * bitmapScaleY
+
+        // Batch-extract all pixels for fast access
+        val pixels = IntArray(bitmapWidth * bitmapHeight)
+        bitmap.getPixels(pixels, 0, bitmapWidth, 0, 0, bitmapWidth, bitmapHeight)
+
+        for (v in 0 until bitmapHeight step (step * 3)) {
+            for (u in 0 until bitmapWidth step (step * 3)) {
+                if (voxelGrid.size >= maxPoints) return
+
+                val xCam = (u - scaledCx) * defaultDepth / scaledFx
+                val yCam = (v - scaledCy) * defaultDepth / scaledFy
                 val zCam = defaultDepth
 
                 val xWorld = poseMatrix[0] * xCam + poseMatrix[4] * yCam + poseMatrix[8] * zCam + poseMatrix[12]
                 val yWorld = poseMatrix[1] * xCam + poseMatrix[5] * yCam + poseMatrix[9] * zCam + poseMatrix[13]
                 val zWorld = poseMatrix[2] * xCam + poseMatrix[6] * yCam + poseMatrix[10] * zCam + poseMatrix[14]
 
-                val pixelColor = bitmap.getPixel(u, v)
+                val pixelColor = pixels[v * bitmapWidth + u]
                 val r = ((pixelColor shr 16) and 0xFF) / 255.0f
                 val g = ((pixelColor shr 8) and 0xFF) / 255.0f
                 val b = (pixelColor and 0xFF) / 255.0f
@@ -319,6 +382,33 @@ object FrameProcessor {
                     )
                 }
             }
+        }
+    }
+
+    /**
+     * Load a downscaled bitmap and return it along with the original image dimensions.
+     * The original dimensions are needed to correctly scale camera intrinsics.
+     */
+    private fun loadSampledBitmap(file: File, sampleSize: Int): Pair<Bitmap, Pair<Int, Int>>? {
+        return try {
+            // First, decode bounds only to get original dimensions
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, boundsOpts)
+            val origWidth = boundsOpts.outWidth
+            val origHeight = boundsOpts.outHeight
+
+            if (origWidth <= 0 || origHeight <= 0) return null
+
+            // Then, decode the actual bitmap at reduced resolution
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
+            val bitmap = BitmapFactory.decodeFile(file.absolutePath, opts) ?: return null
+            Pair(bitmap, Pair(origWidth, origHeight))
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load bitmap: ${file.name} — ${e.message}")
+            null
         }
     }
 

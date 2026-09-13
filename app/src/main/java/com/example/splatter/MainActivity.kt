@@ -231,11 +231,13 @@ class MainActivity : ComponentActivity() {
                                     )
 
                                     // ---- On-device training (multi-view Gaussian refinement) ----
-                                    val mutablePoints = points.toMutableList()
+                                    // processDataset already returns a MutableList; pass it directly to avoid
+                                    // an unnecessary copy that doubles memory at the critical unprojection→training
+                                    // transition (this is where the OOM crash at ~78% was occurring).
                                     runOnUiThread { trainingPhase = true }
                                     val trainedPoints = try {
                                         GaussianSplatTrainer.trainOnDevice(
-                                            initialPoints = mutablePoints,
+                                            initialPoints = points,
                                             datasetDir = File(recordingSession.datasetDirPath),
                                             scanMode = recordingSession.scanMode,
                                             onProgress = { progress ->
@@ -251,7 +253,7 @@ class MainActivity : ComponentActivity() {
                                         )
                                     } catch (e: Exception) {
                                         Log.e("MainActivity", "Training failed, using untrained points", e)
-                                        points
+                                        points.toList()
                                     } finally {
                                         runOnUiThread { trainingPhase = false }
                                     }
