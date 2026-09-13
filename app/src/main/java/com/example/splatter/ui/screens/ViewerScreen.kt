@@ -66,6 +66,7 @@ fun ViewerScreen(
             factory = { ctx ->
                 SplatView(ctx).also { view ->
                     splatViewRef = view
+                    view.setSplatSizeMultiplier(splatSizeMultiplier)
                     view.setPoints(points)
                 }
             },

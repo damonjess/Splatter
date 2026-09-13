@@ -39,6 +39,7 @@ object FrameSaver {
 
         var rgbImage: Image? = null
         var depthImage: Image? = null
+        var confidenceImage: Image? = null
 
         try {
             // 2. Extract Images
@@ -47,6 +48,11 @@ object FrameSaver {
                 frame.acquireRawDepthImage16Bits()
             } catch (_: NotYetAvailableException) {
                 Log.w(TAG, "Raw depth image not yet available for timestamp $timestamp")
+                null
+            }
+            confidenceImage = try {
+                frame.acquireRawDepthConfidenceImage()
+            } catch (_: NotYetAvailableException) {
                 null
             }
 
@@ -58,6 +64,13 @@ object FrameSaver {
 
                 val depthFile = File(storageDir, "depth_$timestamp.raw")
                 depthFile.writeBytes(depthBytes)
+            }
+
+            confidenceImage?.let { conf ->
+                val confBuffer = conf.planes[0].buffer
+                val confBytes = ByteArray(confBuffer.remaining())
+                confBuffer.get(confBytes)
+                File(storageDir, "confidence_$timestamp.raw").writeBytes(confBytes)
             }
 
             // 4. Save RGB Image
@@ -75,6 +88,7 @@ object FrameSaver {
             // IMPORTANT: Free the buffers so the AR session doesn't freeze
             rgbImage?.close()
             depthImage?.close()
+            confidenceImage?.close()
         }
     }
 

@@ -1,7 +1,12 @@
 package com.example.splatter.ui.screens
 
 import android.opengl.GLSurfaceView
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,21 +24,22 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.splatter.model.ScanMode
 
 @Composable
 fun ScanScreen(
+    selectedMode: ScanMode,
+    onModeSelected: (ScanMode) -> Unit,
     isRecording: Boolean,
     frameCount: Int,
     statusText: String,
@@ -106,26 +112,143 @@ fun ScanScreen(
                 }
             }
 
-            // Bottom Recording Controls
+            // Bottom Recording & Mode Controls Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.75f)),
+                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.82f)),
                 shape = RoundedCornerShape(24.dp)
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(20.dp),
+                        .padding(18.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
+                    // Mode Selector Tabs (only editable when not recording)
+                    if (!isRecording) {
+                        Text(
+                            text = "SCAN MODE SELECTOR",
+                            color = Color.White.copy(alpha = 0.5f),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Segmented Control
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF1E222D), RoundedCornerShape(14.dp))
+                                .padding(4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            ScanMode.entries.forEach { mode ->
+                                val isSelected = mode == selectedMode
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(
+                                            if (isSelected) Color(0xFF6200EE) else Color.Transparent
+                                        )
+                                        .clickable { onModeSelected(mode) }
+                                        .padding(vertical = 10.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = if (mode == ScanMode.OBJECT) "📦 Object" else "🏠 Room",
+                                            color = if (isSelected) Color.White else Color.White.copy(alpha = 0.6f),
+                                            fontSize = 14.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Selected Mode Settings Summary Card
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+                                .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        ) {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "Depth: ${selectedMode.minDepthMeters}–${selectedMode.maxDepthMeters} m",
+                                        color = Color(0xFF03DAC6),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = "Voxel: ${if (selectedMode == ScanMode.OBJECT) "4–6 mm" else "10–20 mm"}",
+                                        color = Color(0xFFBB86FC),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = if (selectedMode == ScanMode.OBJECT) "Higher detail • Shorter duration" else "Floor/Wall detection • Large point limit",
+                                        color = Color.White.copy(alpha = 0.85f),
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+                    } else {
+                        // Locked Mode Badge during recording
+                        Row(
+                            modifier = Modifier
+                                .background(Color(0xFF6200EE).copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                .border(1.dp, Color(0xFF6200EE), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (selectedMode == ScanMode.OBJECT) "📦 OBJECT MODE (4–6mm Voxel)" else "🏠 ROOM MODE (Floor/Wall Detection)",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+
+                    // Scan Guidance Prompt
                     Text(
-                        text = if (isRecording) "Move camera slowly around target object..." else "Point camera at target and press REC",
-                        color = Color.White.copy(alpha = 0.8f),
+                        text = if (isRecording) {
+                            if (selectedMode == ScanMode.OBJECT) "Move slowly around target object..."
+                            else "Slowly scan walls, floor & room layout..."
+                        } else {
+                            if (selectedMode == ScanMode.OBJECT) "Point at object (0.3–2.5m) and tap REC"
+                            else "Point around room (0.5–5.0m) and tap REC"
+                        },
+                        color = Color.White.copy(alpha = 0.85f),
                         fontSize = 13.sp
                     )
 
                     Spacer(modifier = Modifier.height(16.dp))
 
+                    // Record / Stop Action Button
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center

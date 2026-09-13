@@ -35,7 +35,7 @@ class GLSplatRenderer : GLSurfaceView.Renderer {
     var targetY = 0f
     var targetZ = 0f
 
-    var pointSizeMultiplier = 2.0f
+    var pointSizeMultiplier = 1.0f
 
     private var vertexBuffer: FloatBuffer? = null
     private var colorBuffer: FloatBuffer? = null

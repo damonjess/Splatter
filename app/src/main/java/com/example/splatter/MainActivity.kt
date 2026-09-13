@@ -2,6 +2,8 @@ package com.example.splatter
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
@@ -14,7 +16,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -25,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.example.splatter.model.ScanMode
 import com.example.splatter.model.ScanSession
 import com.example.splatter.model.SplatPoint
 import com.example.splatter.processor.FrameProcessor
@@ -38,11 +44,13 @@ import com.example.splatter.util.FrameSaver
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Coordinates2d
+import com.google.ar.core.Plane
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import javax.microedition.khronos.egl.EGLConfig
@@ -82,6 +90,8 @@ class MainActivity : ComponentActivity() {
             var scanSessions by remember { mutableStateOf<List<ScanSession>>(emptyList()) }
             var activeSession by remember { mutableStateOf<ScanSession?>(null) }
             var activeSplatPoints by remember { mutableStateOf<List<SplatPoint>>(emptyList()) }
+            var scanPendingName by remember { mutableStateOf<ScanSession?>(null) }
+            var selectedScanMode by remember { mutableStateOf(ScanMode.OBJECT) }
 
             var processingStepText by remember { mutableStateOf("Initializing...") }
             var processingPercent by remember { mutableIntStateOf(0) }
@@ -119,7 +129,7 @@ class MainActivity : ComponentActivity() {
                         sessions = scanSessions,
                         onStartNewScan = {
                             lifecycleScope.launch {
-                                val newSession = repository.createNewScanSession()
+                                val newSession = repository.createNewScanSession(scanMode = selectedScanMode)
                                 currentActiveSession = newSession
                                 activeSession = newSession
                                 frameCountState.value = 0
@@ -153,12 +163,28 @@ class MainActivity : ComponentActivity() {
                                 repository.deleteScanSession(sessionToDelete)
                                 refreshGallery()
                             }
+                        },
+                        onRenameSession = { sessionToRename, newTitle ->
+                            lifecycleScope.launch {
+                                repository.renameScanSession(sessionToRename, newTitle)
+                                refreshGallery()
+                            }
                         }
                     )
                 }
 
                 AppScreen.SCAN -> {
                     ScanScreen(
+                        selectedMode = selectedScanMode,
+                        onModeSelected = { mode ->
+                            selectedScanMode = mode
+                            currentActiveSession?.let { current ->
+                                current.scanMode = mode
+                                lifecycleScope.launch(Dispatchers.IO) {
+                                    File(current.datasetDirPath, "mode.txt").writeText(mode.id)
+                                }
+                            }
+                        },
                         isRecording = isRecordingState.value,
                         frameCount = frameCountState.value,
                         statusText = trackingStatusText.value,
@@ -176,6 +202,7 @@ class MainActivity : ComponentActivity() {
                                 lifecycleScope.launch(Dispatchers.Default) {
                                     val points = FrameProcessor.processDataset(
                                         datasetDir = File(recordingSession.datasetDirPath),
+                                        scanMode = recordingSession.scanMode,
                                         onProgress = { progress ->
                                             runOnUiThread {
                                                 processingStepText = progress.currentStep
@@ -191,6 +218,23 @@ class MainActivity : ComponentActivity() {
                                     val splatFile = File(recordingSession.datasetDirPath, "model.splat")
                                     PlyExporter.exportToSplat(points, splatFile)
 
+                                    // Grab the first captured RGB frame as a thumbnail
+                                    val datasetDir = File(recordingSession.datasetDirPath)
+                                    val firstRgbFile = datasetDir.listFiles { _, name -> name.startsWith("rgb_") && name.endsWith(".jpg") }
+                                        ?.minByOrNull { it.name.removePrefix("rgb_").removeSuffix(".jpg").toLongOrNull() ?: Long.MAX_VALUE }
+
+                                    firstRgbFile?.let { source ->
+                                        val thumbFile = File(datasetDir, "thumbnail.jpg")
+                                        val bitmap = BitmapFactory.decodeFile(source.absolutePath)
+                                        if (bitmap != null) {
+                                            val scaled = Bitmap.createScaledBitmap(bitmap, 320, (320f * bitmap.height / bitmap.width).toInt(), true)
+                                            FileOutputStream(thumbFile).use { out -> scaled.compress(Bitmap.CompressFormat.JPEG, 85, out) }
+                                            bitmap.recycle()
+                                            scaled.recycle()
+                                            recordingSession.thumbnailPath = thumbFile.absolutePath
+                                        }
+                                    }
+
                                     recordingSession.plyFilePath = plyFile.absolutePath
                                     recordingSession.splatFilePath = splatFile.absolutePath
                                     recordingSession.pointCount = points.size
@@ -200,6 +244,7 @@ class MainActivity : ComponentActivity() {
 
                                     runOnUiThread {
                                         currentScreen = AppScreen.VIEWER
+                                        scanPendingName = recordingSession
                                     }
                                 }
                             }
@@ -239,6 +284,36 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+
+            scanPendingName?.let { sessionToName ->
+                var text by remember(sessionToName.id) { mutableStateOf("") }
+                AlertDialog(
+                    onDismissRequest = { scanPendingName = null },
+                    title = { Text("Name this scan") },
+                    text = {
+                        OutlinedTextField(
+                            value = text,
+                            onValueChange = { text = it },
+                            placeholder = { Text(sessionToName.title) },
+                            singleLine = true
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            if (text.isNotBlank()) {
+                                lifecycleScope.launch {
+                                    repository.renameScanSession(sessionToName, text.trim())
+                                    refreshGallery()
+                                }
+                            }
+                            scanPendingName = null
+                        }) { Text("Save") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { scanPendingName = null }) { Text("Skip") }
+                    }
+                )
+            }
         }
     }
 
@@ -271,13 +346,14 @@ class MainActivity : ComponentActivity() {
                     arSession.isDepthModeSupported(Config.DepthMode.AUTOMATIC) -> Config.DepthMode.AUTOMATIC
                     else -> Config.DepthMode.DISABLED
                 }
+                planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
                 focusMode = Config.FocusMode.FIXED
                 updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
             }
             arSession.configure(config)
             arSession.resume()
             session = arSession
-            Log.i(TAG, "AR Session created successfully with depthMode: ${config.depthMode}")
+            Log.i(TAG, "AR Session created successfully with depthMode: ${config.depthMode}, planeFindingMode: ${config.planeFindingMode}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create AR session: ${e.message}", e)
             trackingStatusText.value = "Failed: ${e.message}"
@@ -416,16 +492,33 @@ class MainActivity : ComponentActivity() {
                 GLES20.glDisableVertexAttribArray(texCoordAttrib)
 
                 val trackingState = frame.camera.trackingState
+                val planeCount = try {
+                    activeSession.getAllTrackables(Plane::class.java).count { it.trackingState == TrackingState.TRACKING }
+                } catch (_: Exception) {
+                    0
+                }
+
                 runOnUiThread {
                     trackingStatusText.value = when (trackingState) {
-                        TrackingState.TRACKING -> if (isRecordingState.value) "Capturing..." else "Ready (Tracking Locked)"
+                        TrackingState.TRACKING -> {
+                            if (isRecordingState.value) {
+                                val modeName = currentActiveSession?.scanMode?.displayName ?: "Scan"
+                                if (planeCount > 0) "Capturing $modeName ($planeCount planes tracked)" else "Capturing $modeName..."
+                            } else {
+                                if (planeCount > 0) "Ready ($planeCount floor/wall planes detected)" else "Ready (Tracking Locked)"
+                            }
+                        }
                         TrackingState.PAUSED -> "Searching for features... (Move slowly)"
                         TrackingState.STOPPED -> "Tracking Stopped"
                     }
                 }
 
+                // CRITICAL FIX: Only save frames when tracking is actively TRACKING
                 val now = System.currentTimeMillis()
-                if (isRecordingState.value && (now - lastSavedTimestampMs >= captureIntervalMs)) {
+                if (isRecordingState.value &&
+                    trackingState == TrackingState.TRACKING &&
+                    (now - lastSavedTimestampMs >= captureIntervalMs)
+                ) {
                     lastSavedTimestampMs = now
                     currentActiveSession?.let { activeScan ->
                         val targetDir = File(activeScan.datasetDirPath)

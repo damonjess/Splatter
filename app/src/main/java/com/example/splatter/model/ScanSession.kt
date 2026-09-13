@@ -4,11 +4,12 @@ import java.io.File
 
 data class ScanSession(
     val id: String,
-    val title: String,
+    var title: String,
     val timestamp: Long,
     var frameCount: Int = 0,
     var pointCount: Int = 0,
     val datasetDirPath: String,
+    var scanMode: ScanMode = ScanMode.OBJECT,
     var plyFilePath: String? = null,
     var splatFilePath: String? = null,
     var thumbnailPath: String? = null

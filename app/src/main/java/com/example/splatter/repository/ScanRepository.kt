@@ -2,6 +2,7 @@ package com.example.splatter.repository
 
 import android.content.Context
 import android.util.Log
+import com.example.splatter.model.ScanMode
 import com.example.splatter.model.ScanSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -39,16 +40,25 @@ class ScanRepository(private val context: Context) {
                 pointCount = ((sizeBytes - 400).coerceAtLeast(0) / 56).toInt()
             }
 
+            val thumbFile = File(dir, "thumbnail.jpg")
+            val titleFile = File(dir, "title.txt")
+            val title = if (titleFile.exists()) titleFile.readText().trim() else "Scan $formattedDate"
+
+            val modeFile = File(dir, "mode.txt")
+            val scanMode = if (modeFile.exists()) ScanMode.fromId(modeFile.readText().trim()) else ScanMode.OBJECT
+
             sessions.add(
                 ScanSession(
                     id = dir.name,
-                    title = "Scan $formattedDate",
+                    title = title,
                     timestamp = timestamp,
                     frameCount = poseCount,
                     pointCount = pointCount,
                     datasetDirPath = dir.absolutePath,
+                    scanMode = scanMode,
                     plyFilePath = if (plyFile.exists()) plyFile.absolutePath else null,
-                    splatFilePath = if (splatFile.exists()) splatFile.absolutePath else null
+                    splatFilePath = if (splatFile.exists()) splatFile.absolutePath else null,
+                    thumbnailPath = if (thumbFile.exists()) thumbFile.absolutePath else null
                 )
             )
         }
@@ -56,7 +66,7 @@ class ScanRepository(private val context: Context) {
         sessions.sortedByDescending { it.timestamp }
     }
 
-    suspend fun createNewScanSession(): ScanSession = withContext(Dispatchers.IO) {
+    suspend fun createNewScanSession(scanMode: ScanMode = ScanMode.OBJECT): ScanSession = withContext(Dispatchers.IO) {
         val timestamp = System.currentTimeMillis()
         val parentDir = File(baseDir, "scans")
         val scanDir = File(parentDir, "scan_$timestamp").apply { mkdirs() }
@@ -64,14 +74,25 @@ class ScanRepository(private val context: Context) {
         val dateFormat = SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault())
         val formattedDate = dateFormat.format(Date(timestamp))
 
+        val titleFile = File(scanDir, "title.txt")
+        val title = if (titleFile.exists()) titleFile.readText().trim() else "Scan $formattedDate"
+
+        File(scanDir, "mode.txt").writeText(scanMode.id)
+
         ScanSession(
             id = scanDir.name,
-            title = "Scan $formattedDate",
+            title = title,
             timestamp = timestamp,
             frameCount = 0,
             pointCount = 0,
-            datasetDirPath = scanDir.absolutePath
+            datasetDirPath = scanDir.absolutePath,
+            scanMode = scanMode
         )
+    }
+
+    suspend fun renameScanSession(session: ScanSession, newTitle: String) = withContext(Dispatchers.IO) {
+        session.title = newTitle
+        File(session.datasetDirPath, "title.txt").writeText(newTitle)
     }
 
     suspend fun deleteScanSession(session: ScanSession): Boolean = withContext(Dispatchers.IO) {
