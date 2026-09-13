@@ -45,8 +45,9 @@ class DepthFrame(
 class DepthMeshFuser(
     private val voxelSize: Float,
     private val maxTriangles: Int,
-    private val stride: Int = 1,
-    private val maxEdgeLengthFactor: Float = 10f
+    private val maxEdgeLengthFactor: Float = 10f,
+    /** Connected components with fewer triangles than this are dropped as noise. */
+    private val minComponentTriangles: Int = 15
 ) {
     private val maxEdgeLength = voxelSize * maxEdgeLengthFactor
 
@@ -68,10 +69,16 @@ class DepthMeshFuser(
     val vertexCount: Int get() = positions.size / 3
 
     /**
-     * Fuse one frame. [minDepthM]/[maxDepthM] clip the accepted depth range.
-     * Returns stats for this frame.
+     * Fuse one frame. [minDepthM]/[maxDepthM] clip the accepted depth range;
+     * [stride] skips depth samples so one quad edge spans roughly the voxel
+     * size (see DepthFilters.suggestStride). Returns stats for this frame.
      */
-    fun fuseFrame(frame: DepthFrame, minDepthM: Float, maxDepthM: Float): FuseStats {
+    fun fuseFrame(
+        frame: DepthFrame,
+        minDepthM: Float,
+        maxDepthM: Float,
+        stride: Int = 1
+    ): FuseStats {
         currentFrame++
         val trianglesBefore = triangles.size / 3
 
@@ -103,11 +110,14 @@ class DepthMeshFuser(
                 if (z01 < minDepthM || z01 > maxDepthM) continue
                 if (z11 < minDepthM || z11 > maxDepthM) continue
 
-                // Depth continuity: reject quads spanning a depth discontinuity
+                // Depth continuity: reject quads spanning a depth discontinuity.
+                // Raw depth is noisy (±1–3 cm between neighbours), so the
+                // tolerance must stay comfortably above sensor noise or curved
+                // surfaces get shredded into holes.
                 val zMin = minOf(z00, z10, z01, z11)
                 val zMax = maxOf(z00, z10, z01, z11)
                 val zAvg = (z00 + z10 + z01 + z11) * 0.25f
-                val tolerance = max(0.015f, 0.03f * zAvg)
+                val tolerance = max(0.025f, 0.06f * zAvg)
                 if (zMax - zMin > tolerance) continue
 
                 // Camera-space unprojection (x right, y down, z forward)
@@ -235,7 +245,20 @@ class DepthMeshFuser(
      * are remapped accordingly. Callers should bake photo colors afterwards.
      */
     fun buildMesh(): TriangleMesh {
-        val tri = triangles
+        if (triangles.size == 0) {
+            return TriangleMesh(FloatArray(0), FloatArray(0), IntArray(0))
+        }
+
+        // Drop tiny disconnected fragments (leftover depth noise) before
+        // compaction, so their vertices disappear entirely.
+        val tri: IntArray = if (minComponentTriangles > 1) {
+            filterSmallComponents()
+        } else {
+            IntArray(triangles.size).also { copy -> for (i in 0 until triangles.size) copy[i] = triangles[i] }
+        }
+        if (tri.isEmpty()) {
+            return TriangleMesh(FloatArray(0), FloatArray(0), IntArray(0))
+        }
         val oldCount = positions.size / 3
 
         // Remap used vertices to a dense range
@@ -262,5 +285,52 @@ class DepthMeshFuser(
 
         val colors = FloatArray(newCount * 3) { 0.5f }
         return TriangleMesh(newPositions, colors, newTriangles)
+    }
+
+    /**
+     * Union-find over triangle connectivity; returns the subset of triangles
+     * that belong to components of at least [minComponentTriangles] faces.
+     */
+    private fun filterSmallComponents(): IntArray {
+        val vertexCount = positions.size / 3
+        val parent = IntArray(vertexCount) { it }
+
+        fun find(x: Int): Int {
+            var root = x
+            while (parent[root] != root) root = parent[root]
+            var cur = x
+            while (parent[cur] != cur) {
+                val next = parent[cur]
+                parent[cur] = root
+                cur = next
+            }
+            return root
+        }
+
+        for (f in 0 until triangles.size step 3) {
+            val ra = find(triangles[f])
+            val rb = find(triangles[f + 1])
+            if (ra != rb) parent[ra] = rb
+            val rc = find(triangles[f + 2])
+            val rr = find(triangles[f + 1])
+            if (rr != rc) parent[rc] = rr
+        }
+
+        val triPerRoot = HashMap<Int, Int>()
+        for (f in 0 until triangles.size step 3) {
+            val r = find(triangles[f])
+            triPerRoot[r] = (triPerRoot[r] ?: 0) + 1
+        }
+
+        val kept = IntArray(triangles.size)
+        var n = 0
+        for (f in 0 until triangles.size step 3) {
+            if ((triPerRoot[find(triangles[f])] ?: 0) >= minComponentTriangles) {
+                kept[n++] = triangles[f]
+                kept[n++] = triangles[f + 1]
+                kept[n++] = triangles[f + 2]
+            }
+        }
+        return if (n == kept.size) kept else kept.copyOf(n)
     }
 }

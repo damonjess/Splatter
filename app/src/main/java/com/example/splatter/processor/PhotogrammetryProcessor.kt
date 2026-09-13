@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
 import com.example.splatter.model.ScanMode
+import com.example.splatter.processor.mesh.DepthFilters
 import com.example.splatter.processor.mesh.DepthFrame
 import com.example.splatter.processor.mesh.DepthMeshFuser
 import com.example.splatter.processor.mesh.MeshColorBaker
@@ -31,6 +32,8 @@ object PhotogrammetryProcessor {
 
     /** Max frames used to build the geometry. */
     private const val MAX_GEOMETRY_FRAMES = 72
+    /** Raw-depth confidence below this (0–255) is masked out before fusion. */
+    private const val CONFIDENCE_THRESHOLD = 75
 
     /** Max views used for color baking (can differ from geometry frames). */
     private const val MAX_COLOR_VIEWS = 60
@@ -109,11 +112,9 @@ object PhotogrammetryProcessor {
 
         // ---- 2. Depth fusion into a triangle mesh ----
         val geometryFrames = evenlySample(frames, MAX_GEOMETRY_FRAMES)
-        val stride = if (scanMode.voxelSizeMeters >= 0.012f) 2 else 1
         val fuser = DepthMeshFuser(
             voxelSize = scanMode.voxelSizeMeters,
-            maxTriangles = scanMode.maxPointLimit,
-            stride = stride
+            maxTriangles = scanMode.maxPointLimit
         )
 
         for ((index, frame) in geometryFrames.withIndex()) {
@@ -122,14 +123,39 @@ object PhotogrammetryProcessor {
                 break
             }
             val depth = loadDepth(datasetDir, frame.timestamp) ?: continue
+
+            // Mask out low-confidence depth pixels before fusion — they are
+            // the classic source of floating fragments in ARCore raw depth
+            val confidence = loadConfidence(datasetDir, frame.timestamp, depth.width, depth.height)
+            if (confidence != null) {
+                for (i in depth.values.indices) {
+                    if (confidence[i] < CONFIDENCE_THRESHOLD && depth.values[i].toInt() != 0) {
+                        depth.values[i] = 0
+                    }
+                }
+            }
+
+            // Median-filter the raw depth to kill single-pixel speckle that
+            // would otherwise become floating mesh fragments
+            val filteredDepth = DepthFilters.medianFilter3x3(depth.values, depth.width, depth.height)
+
             val depthFx = (frame.fx * depth.width / frame.imgWidth).coerceAtLeast(1f)
             val depthFy = (frame.fy * depth.height / frame.imgHeight).coerceAtLeast(1f)
             val depthCx = frame.cx * depth.width / frame.imgWidth
             val depthCy = frame.cy * depth.height / frame.imgHeight
 
+            // Adaptive stride: sample the depth grid so one quad edge spans
+            // roughly 1.5 voxels of world space. Stride 1 at close range makes
+            // neighbouring corners collapse into one voxel (degenerate
+            // triangles -> holes); a fixed coarse stride loses detail.
+            val medianDepthM = DepthFilters.medianDepthMm(filteredDepth) / 1000f
+            val stride = if (medianDepthM > 0f) {
+                DepthFilters.suggestStride(medianDepthM, depthFx, scanMode.voxelSizeMeters * 1.5f)
+            } else 1
+
             fuser.fuseFrame(
                 frame = DepthFrame(
-                    depthMm = depth.values,
+                    depthMm = filteredDepth,
                     depthWidth = depth.width,
                     depthHeight = depth.height,
                     pose = frame.pose,
@@ -139,7 +165,8 @@ object PhotogrammetryProcessor {
                     cy = depthCy
                 ),
                 minDepthM = scanMode.minDepthMeters,
-                maxDepthM = scanMode.maxDepthMeters
+                maxDepthM = scanMode.maxDepthMeters,
+                stride = stride
             )
 
             val percent = 10 + ((index + 1).toFloat() / geometryFrames.size * 50).toInt()
@@ -220,6 +247,19 @@ object PhotogrammetryProcessor {
 
     private class DepthData(val values: ShortArray, val width: Int, val height: Int)
     private class BitmapData(val pixels: IntArray, val width: Int, val height: Int)
+
+    /** Loads the per-pixel raw-depth confidence map (1 byte/pixel), or null. */
+    private fun loadConfidence(datasetDir: File, timestamp: Long, width: Int, height: Int): ByteArray? {
+        val file = File(datasetDir, "confidence_$timestamp.raw")
+        if (!file.exists()) return null
+        return try {
+            val bytes = file.readBytes()
+            // Only trust it if it matches the depth resolution exactly
+            if (bytes.size == width * height) bytes else null
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     private fun loadDepth(datasetDir: File, timestamp: Long): DepthData? {
         return try {

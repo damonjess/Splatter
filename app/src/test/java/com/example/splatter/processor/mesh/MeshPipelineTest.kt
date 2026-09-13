@@ -235,6 +235,140 @@ class MeshPipelineTest {
     }
 
     @Test
+    fun `median filter removes single-pixel depth spikes`() {
+        // 8x8 plane at 1000 mm with one speckle pixel at 2000 mm
+        val w = 8; val h = 8
+        val depth = ShortArray(w * h) { 1000.toShort() }
+        depth[3 * w + 4] = 2000.toShort()
+        val filtered = DepthFilters.medianFilter3x3(depth, w, h)
+
+        assertEquals(1000, filtered[3 * w + 4].toInt() and 0xFFFF)
+        for (i in depth.indices) {
+            assertEquals(1000, filtered[i].toInt() and 0xFFFF)
+        }
+    }
+
+    @Test
+    fun `median filter preserves a genuine depth edge`() {
+        // Left half near, right half far — the boundary must not be smoothed away
+        val w = 8; val h = 8
+        val depth = ShortArray(w * h) { if (it % w < 4) 800.toShort() else 2000.toShort() }
+        val filtered = DepthFilters.medianFilter3x3(depth, w, h)
+
+        assertEquals(2000, filtered[3 * w + 6].toInt() and 0xFFFF)
+        assertEquals(800, filtered[3 * w + 1].toInt() and 0xFFFF)
+    }
+
+    @Test
+    fun `suggest stride scales with depth and voxel size`() {
+        // 160px-wide depth, fx ≈ 128: at 0.5 m spacing ≈ 3.9 mm, target 6 mm → 2
+        assertEquals(2, DepthFilters.suggestStride(0.5f, fx = 128f, targetMeters = 0.006f))
+        // At 2 m spacing ≈ 15.6 mm → stride 1
+        assertEquals(1, DepthFilters.suggestStride(2.0f, fx = 128f, targetMeters = 0.006f))
+        // Denser depth sensor (fx 512): at 0.5 m spacing ≈ 1 mm → 7
+        assertEquals(7, DepthFilters.suggestStride(0.5f, fx = 512f, targetMeters = 0.006f))
+        // Never below 1
+        assertEquals(1, DepthFilters.suggestStride(5.0f, fx = 64f, targetMeters = 0.006f))
+    }
+
+    @Test
+    fun `photo mesh params produce a dense mesh at close range`() {
+        // Regression for the v1.3 hole-riddled scans: a wall at 0.5 m scanned
+        // with the real PHOTO parameters (4 mm voxel, adaptive stride) must
+        // produce a dense connected grid — the old 10 mm voxel + stride 1
+        // collapsed most quads into degenerate triangles.
+        val size = 32
+        val depth = ShortArray(size * size) { 500.toShort() }
+        val fx = 128f
+        val stride = DepthFilters.suggestStride(
+            medianDepthM = 0.5f,
+            fx = fx,
+            targetMeters = 0.004f * 1.5f
+        )
+        assertEquals(2, stride)
+
+        val fuser = DepthMeshFuser(voxelSize = 0.004f, maxTriangles = 600_000)
+        fuser.fuseFrame(
+            frame = DepthFrame(
+                depthMm = depth,
+                depthWidth = size,
+                depthHeight = size,
+                pose = floatArrayOf(
+                    1f, 0f, 0f, 0f,
+                    0f, 1f, 0f, 0f,
+                    0f, 0f, 1f, 0f,
+                    0f, 0f, 0f, 1f
+                ),
+                fx = fx,
+                fy = fx,
+                cx = 15.5f,
+                cy = 15.5f
+            ),
+            minDepthM = 0.3f,
+            maxDepthM = 5f,
+            stride = stride
+        )
+        val mesh = fuser.buildMesh()
+
+        // 15x15 quads at stride 2 → ~450 triangles, 16x16 vertices — dense
+        assertTrue("expected dense mesh, got ${mesh.triangleCount} triangles", mesh.triangleCount >= 400)
+        assertTrue(mesh.vertexCount >= 220)
+
+        // The old failing configuration for contrast: 10 mm voxel + stride 1
+        val oldFuser = DepthMeshFuser(voxelSize = 0.01f, maxTriangles = 600_000)
+        oldFuser.fuseFrame(
+            frame = DepthFrame(
+                depthMm = depth,
+                depthWidth = size,
+                depthHeight = size,
+                pose = floatArrayOf(
+                    1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f
+                ),
+                fx = fx, fy = fx, cx = 15.5f, cy = 15.5f
+            ),
+            minDepthM = 0.3f,
+            maxDepthM = 5f,
+            stride = 1
+        )
+        assertTrue("old config should be sparse (the bug)", oldFuser.triangleCount < 450)
+    }
+
+    @Test
+    fun `small disconnected fragments are dropped`() {
+        // A large wall plus a distant tiny 2x2-quad blob (floating noise)
+        val fuser = DepthMeshFuser(voxelSize = 0.005f, maxTriangles = 100_000)
+        fuser.fuseFrame(flatFrame(flatDepth(1000)), minDepthM = 0.3f, maxDepthM = 5f)
+
+        val size = 16
+        val blobDepth = ShortArray(size * size)
+        // Two adjacent quads of valid depth far from the wall's vertices
+        for (v in 12..13) {
+            for (u in 12..13) {
+                blobDepth[v * size + u] = 1500.toShort()
+            }
+        }
+        fuser.fuseFrame(
+            frame = DepthFrame(
+                depthMm = blobDepth,
+                depthWidth = size,
+                depthHeight = size,
+                pose = floatArrayOf(
+                    1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f
+                ),
+                fx = 100f, fy = 100f, cx = 7.5f, cy = 7.5f
+            ),
+            minDepthM = 0.3f,
+            maxDepthM = 5f
+        )
+
+        // Raw triangle count includes the blob; buildMesh() must drop it
+        assertTrue(fuser.triangleCount > 450)
+        val mesh = fuser.buildMesh()
+        assertEquals(450, mesh.triangleCount)
+        assertEquals(256, mesh.vertexCount)
+    }
+
+    @Test
     fun `ply round trip preserves geometry and colors`() {
         val fuser = DepthMeshFuser(voxelSize = 0.005f, maxTriangles = 100_000)
         fuser.fuseFrame(flatFrame(flatDepth(1000)), minDepthM = 0.3f, maxDepthM = 5f)

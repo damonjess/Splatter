@@ -41,12 +41,14 @@ enum class ScanMode(
         displayName = "Photo Mesh",
         minDepthMeters = 0.3f,
         maxDepthMeters = 5.0f,
-        voxelSizeMeters = 0.01f, // 10 mm fusion voxel
-        maxPointLimit = 500_000, // triangle cap for the fused mesh
+        voxelSizeMeters = 0.004f, // 4 mm fusion voxel — must stay near raw depth
+        // pixel spacing at object distance, or triangles collapse into
+        // degenerates and the mesh gets shredded into holes
+        maxPointLimit = 600_000, // triangle cap for the fused mesh
         enablePlaneDetection = false,
         detailLevelText = "Textured triangle mesh (photogrammetry-style)",
         scanDurationText = "Orbit slowly for full coverage",
-        description = "0.3–5.0 m depth • 10 mm fusion voxel • Textured photo mesh • PLY + OBJ export"
+        description = "0.3–5.0 m depth • 4 mm fusion voxel • Textured photo mesh • PLY + OBJ export"
     );
 
     companion object {

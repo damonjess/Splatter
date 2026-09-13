@@ -1,4 +1,4 @@
-# Splatter — personal build for HONOR Magic 8 Pro (v1.3-magic8pro)
+# Splatter — personal build for HONOR Magic 8 Pro (v1.3.1-magic8pro)
 
 ## What this is
 A personal build of the open-source [Splatter](https://github.com/damonjess/Splatter) app: record a video-like scan with ARCore, and the phone reconstructs it on-device into a 3D splat/point cloud (PLY + .splat), viewable in the built-in 3D viewer. Built for a HONOR Magic 8 Pro, which is on [Google's official ARCore supported devices list](https://developers.google.com/ar/devices) with Depth API support, so raw depth capture works.
@@ -7,11 +7,17 @@ A personal build of the open-source [Splatter](https://github.com/damonjess/Spla
 
 Pick **📷 Photo Mesh** on the scan screen and the app now produces a **textured triangle mesh** from your scan, in addition to the existing splat output:
 
-- **Depth fusion into a mesh** — up to 72 keyframes are unprojected and stitched into a single triangle mesh. Neighbouring depth samples become triangles, with rejection of triangles that span depth jumps or stretch beyond 10 voxels, and coverage suppression so overlapping views don't create duplicated surfaces. Vertices are shared across frames via a voxel-quantized spatial hash (10 mm voxel)
+- **Depth fusion into a mesh** — up to 72 keyframes are unprojected and stitched into a single triangle mesh. Neighbouring depth samples become triangles, with rejection of triangles that span depth jumps or stretch beyond 10 voxels, and coverage suppression so overlapping views don't create duplicated surfaces. Vertices are shared across frames via a voxel-quantized spatial hash (4 mm voxel)
+- **v1.3.1 mesh quality fixes** — the first Photo Mesh build produced hole-riddled meshes at close range. Root cause: the 10 mm fusion voxel was coarser than the 2–4 mm spacing of raw depth samples at object distance, so most triangles collapsed into degenerates and were rejected. Fixed by: 4 mm fusion voxel; a per-frame adaptive sampling stride (quad edges ≈ 1.5 voxels of world space, so corners never collapse); a 3×3 median filter on raw depth before fusion; low-confidence depth masking (per-pixel confidence < 75/255 is dropped); loosened depth-continuity tolerance to match ARCore raw-depth noise; and small-fragment cleanup (connected components under 15 triangles are removed as noise)
 - **Photo color baking** — every mesh vertex is projected into up to 60 captured photos and its color is blended from all views that see it, weighted by viewing angle and distance. A raw-depth occlusion test prevents vertices from being colored by views where they are hidden behind other geometry — this is what gives the model the crisp "photogrammetry" look instead of a single-frame color snapshot
 - **Mesh viewer** — the built-in 3D viewer renders the mesh with per-vertex photo colors, headlight shading, a wireframe toggle, and the same orbit/pan/zoom gestures as the splat viewer
 - **PLY + OBJ export** — Photo Mesh scans are saved as `model_mesh.ply` (binary, vertices + faces + vertex colors, openable in MeshLab/Blender) and `model_mesh.obj`, both shareable and savable to Downloads
-- The mesh pipeline is pure Kotlin (no Android dependencies in the geometry/coloring core) and covered by 10 JVM unit tests (`MeshPipelineTest`)
+- The mesh pipeline is pure Kotlin (no Android dependencies in the geometry/coloring core) and covered by 16 JVM unit tests (`MeshPipelineTest`), including a regression test that reproduces the v1.3 hole-riddled failure mode with the old parameters
+
+### Tips for good Photo Mesh results
+- Stay **0.5–1.5 m** from the subject and orbit slowly; the mesh fuses best with overlapping views
+- Matte, well-lit, non-reflective subjects reconstruct far better than shiny/dark ones (raw depth struggles with both)
+- 4 mm resolution is tuned for object-scale scans; a whole room will hit the 600k triangle cap and lose detail — use Room mode splats for room-scale captures
 
 Note: this is ARCore-assisted photogrammetry — camera poses come from AR tracking and the surface geometry comes from the raw depth sensor, then the captured photos are projected onto the fused mesh. Full photo-only SfM/MVS (no depth sensor) is not implemented; it would need significantly heavier on-device computation.
 
