@@ -41,12 +41,230 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
 import com.example.splatter.model.ScanSession
 import com.example.splatter.model.SplatPoint
+import com.example.splatter.processor.MeshExporter
 import com.example.splatter.processor.PlyExporter
+import com.example.splatter.processor.mesh.TriangleMesh
+import com.example.splatter.ui.viewer.MeshView
 import com.example.splatter.ui.viewer.SplatView
 import java.io.File
 
 @Composable
 fun ViewerScreen(
+    session: ScanSession,
+    points: List<SplatPoint>,
+    onBackClicked: () -> Unit,
+    mesh: TriangleMesh? = null
+) {
+    if (mesh != null) {
+        MeshViewerScreen(session = session, mesh = mesh, onBackClicked = onBackClicked)
+    } else {
+        SplatViewerScreen(session = session, points = points, onBackClicked = onBackClicked)
+    }
+}
+
+@Composable
+fun MeshViewerScreen(
+    session: ScanSession,
+    mesh: TriangleMesh,
+    onBackClicked: () -> Unit
+) {
+    val context = LocalContext.current
+    var wireframe by remember { mutableStateOf(false) }
+    var meshViewRef: MeshView? by remember { mutableStateOf(null) }
+
+    LaunchedEffect(mesh) {
+        meshViewRef?.setMesh(mesh)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0D0E12))
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                MeshView(ctx).also { view ->
+                    meshViewRef = view
+                    view.setWireframe(wireframe)
+                    view.setMesh(mesh)
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // Top Navigation Header
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 40.dp, start = 16.dp, end = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.7f)),
+                shape = CircleShape,
+                onClick = onBackClicked
+            ) {
+                Text(
+                    text = "← Back",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                )
+            }
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.7f)),
+                shape = CircleShape
+            ) {
+                Text(
+                    text = "${session.title} (${mesh.triangleCount} tris)",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                )
+            }
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF03DAC6)),
+                shape = CircleShape,
+                onClick = {
+                    session.getMeshFile()?.let { file ->
+                        if (file.exists()) {
+                            MeshExporter.shareFile(context, file, session.title)
+                        } else {
+                            Toast.makeText(context, "Mesh PLY not found", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            ) {
+                Text(
+                    text = "Export",
+                    color = Color.Black,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                )
+            }
+        }
+
+        // Bottom Controls Overlay Card
+        Card(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(20.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.8f)),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Photo Mesh",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    Button(
+                        onClick = {
+                            wireframe = !wireframe
+                            meshViewRef?.setWireframe(wireframe)
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (wireframe) Color(0xFF03DAC6) else Color.White.copy(alpha = 0.15f)
+                        ),
+                        shape = CircleShape,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            if (wireframe) "Wireframe: On" else "Wireframe: Off",
+                            color = if (wireframe) Color.Black else Color.White,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            meshViewRef?.resetCamera()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.15f)),
+                        shape = CircleShape,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Reset View", color = Color.White, fontSize = 12.sp)
+                    }
+
+                    Button(
+                        onClick = {
+                            session.getMeshFile()?.let { file ->
+                                if (file.exists()) {
+                                    val success = MeshExporter.exportFileToDownloads(context, file, session.title)
+                                    if (success) {
+                                        Toast.makeText(context, "Saved ${file.name} to Downloads/Splatter3D", Toast.LENGTH_LONG).show()
+                                    } else {
+                                        Toast.makeText(context, "Failed to save mesh", Toast.LENGTH_SHORT).show()
+                                    }
+                                } else {
+                                    Toast.makeText(context, "Mesh PLY not found", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF03DAC6)),
+                        shape = CircleShape,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("💾 Save PLY", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    val objFile = File(session.datasetDirPath, MeshExporter.MESH_OBJ_FILENAME)
+                    Button(
+                        onClick = {
+                            if (objFile.exists()) {
+                                val success = MeshExporter.exportFileToDownloads(context, objFile, session.title)
+                                if (success) {
+                                    Toast.makeText(context, "Saved OBJ to Downloads/Splatter3D", Toast.LENGTH_LONG).show()
+                                } else {
+                                    Toast.makeText(context, "Failed to save OBJ", Toast.LENGTH_SHORT).show()
+                                }
+                            } else {
+                                Toast.makeText(context, "OBJ file not found", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFBB86FC)),
+                        shape = CircleShape,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("💾 Save OBJ", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SplatViewerScreen(
     session: ScanSession,
     points: List<SplatPoint>,
     onBackClicked: () -> Unit

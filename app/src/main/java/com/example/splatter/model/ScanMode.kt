@@ -35,6 +35,18 @@ enum class ScanMode(
         detailLevelText = "10–20 mm voxel (larger scale)",
         scanDurationText = "Longer scan duration",
         description = "0.5–5.0 m depth • 15 mm voxel size • Floor/wall detection • Larger point limit"
+    ),
+    PHOTO(
+        id = "PHOTO",
+        displayName = "Photo Mesh",
+        minDepthMeters = 0.3f,
+        maxDepthMeters = 5.0f,
+        voxelSizeMeters = 0.01f, // 10 mm fusion voxel
+        maxPointLimit = 500_000, // triangle cap for the fused mesh
+        enablePlaneDetection = false,
+        detailLevelText = "Textured triangle mesh (photogrammetry-style)",
+        scanDurationText = "Orbit slowly for full coverage",
+        description = "0.3–5.0 m depth • 10 mm fusion voxel • Textured photo mesh • PLY + OBJ export"
     );
 
     companion object {

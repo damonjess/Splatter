@@ -333,7 +333,7 @@ fun ScanItemCard(
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text(
-                        text = "%,d Gaussians".format(session.pointCount),
+                        text = if (session.scanMode == ScanMode.PHOTO) "%,d Vertices".format(session.pointCount) else "%,d Gaussians".format(session.pointCount),
                         color = Color(0xFF03DAC6),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
@@ -348,7 +348,11 @@ fun ScanItemCard(
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text(
-                        text = if (session.scanMode == ScanMode.OBJECT) "📦 Object" else "🏠 Room",
+                        text = when (session.scanMode) {
+                            ScanMode.OBJECT -> "📦 Object"
+                            ScanMode.ROOM -> "🏠 Room"
+                            ScanMode.PHOTO -> "📷 Photo Mesh"
+                        },
                         color = Color(0xFFBB86FC),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,

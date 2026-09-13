@@ -36,7 +36,9 @@ fun ProcessingScreen(
     isTraining: Boolean = false,
     trainingIteration: Int = 0,
     trainingTotalIterations: Int = 0,
-    trainingLoss: Float = 0f
+    trainingLoss: Float = 0f,
+    titleText: String = "Processing 3D Splat Model",
+    pointCountLabel: String = "Gaussians"
 ) {
     Box(
         modifier = Modifier
@@ -66,7 +68,7 @@ fun ProcessingScreen(
                 )
 
                 Text(
-                    text = if (isTraining) "Training on Device" else "Processing 3D Splat Model",
+                    text = if (isTraining) "Training on Device" else titleText,
                     color = Color.White,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
@@ -106,7 +108,7 @@ fun ProcessingScreen(
                 if (pointCount > 0) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Gaussians: %,d".format(pointCount),
+                        text = "$pointCountLabel: %,d".format(pointCount),
                         color = Color(0xFF03DAC6),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium

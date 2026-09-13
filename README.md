@@ -1,7 +1,19 @@
-# Splatter — personal build for HONOR Magic 8 Pro (v1.2-magic8pro)
+# Splatter — personal build for HONOR Magic 8 Pro (v1.3-magic8pro)
 
 ## What this is
 A personal build of the open-source [Splatter](https://github.com/damonjess/Splatter) app: record a video-like scan with ARCore, and the phone reconstructs it on-device into a 3D splat/point cloud (PLY + .splat), viewable in the built-in 3D viewer. Built for a HONOR Magic 8 Pro, which is on [Google's official ARCore supported devices list](https://developers.google.com/ar/devices) with Depth API support, so raw depth capture works.
+
+## What's new in v1.3 — Photo Mesh mode (Polycam-style photogrammetry)
+
+Pick **📷 Photo Mesh** on the scan screen and the app now produces a **textured triangle mesh** from your scan, in addition to the existing splat output:
+
+- **Depth fusion into a mesh** — up to 72 keyframes are unprojected and stitched into a single triangle mesh. Neighbouring depth samples become triangles, with rejection of triangles that span depth jumps or stretch beyond 10 voxels, and coverage suppression so overlapping views don't create duplicated surfaces. Vertices are shared across frames via a voxel-quantized spatial hash (10 mm voxel)
+- **Photo color baking** — every mesh vertex is projected into up to 60 captured photos and its color is blended from all views that see it, weighted by viewing angle and distance. A raw-depth occlusion test prevents vertices from being colored by views where they are hidden behind other geometry — this is what gives the model the crisp "photogrammetry" look instead of a single-frame color snapshot
+- **Mesh viewer** — the built-in 3D viewer renders the mesh with per-vertex photo colors, headlight shading, a wireframe toggle, and the same orbit/pan/zoom gestures as the splat viewer
+- **PLY + OBJ export** — Photo Mesh scans are saved as `model_mesh.ply` (binary, vertices + faces + vertex colors, openable in MeshLab/Blender) and `model_mesh.obj`, both shareable and savable to Downloads
+- The mesh pipeline is pure Kotlin (no Android dependencies in the geometry/coloring core) and covered by 10 JVM unit tests (`MeshPipelineTest`)
+
+Note: this is ARCore-assisted photogrammetry — camera poses come from AR tracking and the surface geometry comes from the raw depth sensor, then the captured photos are projected onto the fused mesh. Full photo-only SfM/MVS (no depth sensor) is not implemented; it would need significantly heavier on-device computation.
 
 ## What's new in v1.2 — On-device training
 After the scan finishes and the initial point cloud is unprojected, the app now runs an **on-device Gaussian splat training** pass before exporting the model. This iteratively refines splat parameters using multi-view observations from the captured frames:

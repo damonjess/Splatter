@@ -272,7 +272,11 @@ fun ScanScreen(
                                 ) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
-                                            text = if (mode == ScanMode.OBJECT) "📦 Object" else "🏠 Room",
+                                            text = when (mode) {
+                                                ScanMode.OBJECT -> "📦 Object"
+                                                ScanMode.ROOM -> "🏠 Room"
+                                                ScanMode.PHOTO -> "📷 Photo Mesh"
+                                            },
                                             color = if (isSelected) Color.White else Color.White.copy(alpha = 0.6f),
                                             fontSize = 14.sp,
                                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
@@ -304,7 +308,11 @@ fun ScanScreen(
                                         fontWeight = FontWeight.SemiBold
                                     )
                                     Text(
-                                        text = "Voxel: ${if (selectedMode == ScanMode.OBJECT) "4–6 mm" else "10–20 mm"}",
+                                        text = "Voxel: ${when (selectedMode) {
+                                            ScanMode.OBJECT -> "4–6 mm"
+                                            ScanMode.ROOM -> "10–20 mm"
+                                            ScanMode.PHOTO -> "10 mm"
+                                        }}",
                                         color = Color(0xFFBB86FC),
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.SemiBold
@@ -318,7 +326,7 @@ fun ScanScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
                                     Text(
-                                        text = if (selectedMode == ScanMode.OBJECT) "Higher detail • Shorter duration" else "Floor/Wall detection • Large point limit",
+                                        text = selectedMode.description,
                                         color = Color.White.copy(alpha = 0.85f),
                                         fontSize = 11.sp
                                     )
@@ -337,7 +345,11 @@ fun ScanScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = if (selectedMode == ScanMode.OBJECT) "📦 OBJECT MODE (4–6mm Voxel)" else "🏠 ROOM MODE (Floor/Wall Detection)",
+                                text = when (selectedMode) {
+                                    ScanMode.OBJECT -> "📦 OBJECT MODE (4–6mm Voxel)"
+                                    ScanMode.ROOM -> "🏠 ROOM MODE (Floor/Wall Detection)"
+                                    ScanMode.PHOTO -> "📷 PHOTO MESH MODE (Textured Mesh)"
+                                },
                                 color = Color.White,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
@@ -349,11 +361,17 @@ fun ScanScreen(
                     // Scan Guidance Prompt
                     Text(
                         text = if (isRecording) {
-                                if (selectedMode == ScanMode.OBJECT) "Move slowly around target object..."
-                                else "Slowly scan walls, floor & room layout..."
+                                when (selectedMode) {
+                                    ScanMode.OBJECT -> "Move slowly around target object..."
+                                    ScanMode.ROOM -> "Slowly scan walls, floor & room layout..."
+                                    ScanMode.PHOTO -> "Orbit slowly — capture every side with overlap..."
+                                }
                             } else {
-                                if (selectedMode == ScanMode.OBJECT) "Point at object (0.3–2.5m) and tap REC"
-                                else "Point around room (0.5–5.0m) and tap REC"
+                                when (selectedMode) {
+                                    ScanMode.OBJECT -> "Point at object (0.3–2.5m) and tap REC"
+                                    ScanMode.ROOM -> "Point around room (0.5–5.0m) and tap REC"
+                                    ScanMode.PHOTO -> "Point at subject (0.3–5m) and tap REC"
+                                }
                             },
                             color = Color.White.copy(alpha = 0.85f),
                             fontSize = 13.sp

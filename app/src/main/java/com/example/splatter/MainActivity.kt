@@ -36,8 +36,11 @@ import com.example.splatter.model.ScanSession
 import com.example.splatter.model.SplatPoint
 import com.example.splatter.processor.FrameProcessor
 import com.example.splatter.processor.GaussianSplatTrainer
+import com.example.splatter.processor.MeshExporter
+import com.example.splatter.processor.PhotogrammetryProcessor
 import com.example.splatter.processor.PlyExporter
 import com.example.splatter.processor.RoomReconstructionProcessor
+import com.example.splatter.processor.mesh.TriangleMesh
 import com.example.splatter.repository.ScanRepository
 import com.example.splatter.ui.screens.GalleryScreen
 import com.example.splatter.ui.screens.ProcessingScreen
@@ -100,6 +103,7 @@ class MainActivity : ComponentActivity() {
             var scanSessions by remember { mutableStateOf<List<ScanSession>>(emptyList()) }
             var activeSession by remember { mutableStateOf<ScanSession?>(null) }
             var activeSplatPoints by remember { mutableStateOf<List<SplatPoint>>(emptyList()) }
+            var activeMesh by remember { mutableStateOf<TriangleMesh?>(null) }
             var scanPendingName by remember { mutableStateOf<ScanSession?>(null) }
             var selectedScanMode by remember { mutableStateOf(ScanMode.OBJECT) }
 
@@ -110,6 +114,7 @@ class MainActivity : ComponentActivity() {
             var trainingIteration by remember { mutableIntStateOf(0) }
             var trainingTotalIterations by remember { mutableIntStateOf(0) }
             var trainingLoss by remember { mutableStateOf(0f) }
+            var processingIsPhotoMode by remember { mutableStateOf(false) }
 
             var hasCameraPermission by remember {
                 mutableStateOf(
@@ -153,9 +158,36 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onOpenSession = { selectedSession ->
+                            val meshFile = selectedSession.getMeshFile()
+                            if (meshFile != null && meshFile.exists()) {
+                                // Photo Mesh scan
+                                activeSession = selectedSession
+                                processingIsPhotoMode = true
+                                currentScreen = AppScreen.PROCESSING
+                                processingStepText = "Loading Photo Mesh..."
+                                processingPercent = 40
+                                processingPointCount = selectedSession.pointCount
+
+                                lifecycleScope.launch(Dispatchers.Default) {
+                                    val mesh = MeshExporter.loadMeshPly(meshFile)
+                                    runOnUiThread {
+                                        if (mesh != null) {
+                                            activeMesh = mesh
+                                            activeSplatPoints = emptyList()
+                                            currentScreen = AppScreen.VIEWER
+                                        } else {
+                                            currentScreen = AppScreen.GALLERY
+                                            Toast.makeText(this@MainActivity, "Failed to load mesh", Toast.LENGTH_SHORT).show()
+                                        }
+                                        processingIsPhotoMode = false
+                                    }
+                                }
+                            } else {
                             val plyFile = selectedSession.getPlyFile()
                             if (plyFile != null && plyFile.exists()) {
                                 activeSession = selectedSession
+                                processingIsPhotoMode = false
+                                activeMesh = null
                                 currentScreen = AppScreen.PROCESSING
                                 processingStepText = "Loading 3D Gaussian Splat model..."
                                 processingPercent = 40
@@ -170,6 +202,7 @@ class MainActivity : ComponentActivity() {
                                 }
                             } else {
                                 Toast.makeText(this, "Model file not found", Toast.LENGTH_SHORT).show()
+                            }
                             }
                         },
                         onDeleteSession = { sessionToDelete ->
@@ -216,6 +249,54 @@ class MainActivity : ComponentActivity() {
                                 isRecordingState.value = false
                                 val recordingSession = currentActiveSession ?: return@ScanScreen
                                 currentScreen = AppScreen.PROCESSING
+                                val photoMode = recordingSession.scanMode == ScanMode.PHOTO
+                                processingIsPhotoMode = photoMode
+
+                                if (photoMode) {
+                                    // ---- Photo Mesh (photogrammetry-style) pipeline ----
+                                    lifecycleScope.launch(Dispatchers.Default) {
+                                        val datasetDir = File(recordingSession.datasetDirPath)
+                                        val mesh = PhotogrammetryProcessor.process(
+                                            datasetDir = datasetDir,
+                                            scanMode = recordingSession.scanMode,
+                                            onProgress = { progress ->
+                                                runOnUiThread {
+                                                    processingStepText = progress.currentStep
+                                                    processingPercent = progress.progressPercent
+                                                    processingPointCount = progress.pointCount
+                                                }
+                                            }
+                                        )
+
+                                        if (mesh == null) {
+                                            runOnUiThread {
+                                                currentScreen = AppScreen.GALLERY
+                                                scanPendingName = null
+                                                processingIsPhotoMode = false
+                                                Toast.makeText(this@MainActivity, "Photo mesh failed — not enough depth data captured", Toast.LENGTH_LONG).show()
+                                                refreshGallery()
+                                            }
+                                            return@launch
+                                        }
+
+                                        val meshPlyFile = MeshExporter.exportMeshFiles(mesh, datasetDir)
+                                        makeThumbnail(datasetDir)?.let { thumbFile ->
+                                            recordingSession.thumbnailPath = thumbFile.absolutePath
+                                        }
+
+                                        recordingSession.meshFilePath = meshPlyFile?.absolutePath
+                                        recordingSession.pointCount = mesh.vertexCount
+
+                                        runOnUiThread {
+                                            activeMesh = mesh
+                                            activeSplatPoints = emptyList()
+                                            activeSession = recordingSession
+                                            currentScreen = AppScreen.VIEWER
+                                            scanPendingName = recordingSession
+                                            processingIsPhotoMode = false
+                                        }
+                                    }
+                                } else {
 
                                 lifecycleScope.launch(Dispatchers.Default) {
                                     val points = FrameProcessor.processDataset(
@@ -276,19 +357,8 @@ class MainActivity : ComponentActivity() {
 
                                     // Grab the first captured RGB frame as a thumbnail
                                     val datasetDir = File(recordingSession.datasetDirPath)
-                                    val firstRgbFile = datasetDir.listFiles { _, name -> name.startsWith("rgb_") && name.endsWith(".jpg") }
-                                        ?.minByOrNull { it.name.removePrefix("rgb_").removeSuffix(".jpg").toLongOrNull() ?: Long.MAX_VALUE }
-
-                                    firstRgbFile?.let { source ->
-                                        val thumbFile = File(datasetDir, "thumbnail.jpg")
-                                        val bitmap = BitmapFactory.decodeFile(source.absolutePath)
-                                        if (bitmap != null) {
-                                            val scaled = Bitmap.createScaledBitmap(bitmap, 320, (320f * bitmap.height / bitmap.width).toInt(), true)
-                                            FileOutputStream(thumbFile).use { out -> scaled.compress(Bitmap.CompressFormat.JPEG, 85, out) }
-                                            bitmap.recycle()
-                                            scaled.recycle()
-                                            recordingSession.thumbnailPath = thumbFile.absolutePath
-                                        }
+                                    makeThumbnail(datasetDir)?.let { thumbFile ->
+                                        recordingSession.thumbnailPath = thumbFile.absolutePath
                                     }
 
                                     recordingSession.plyFilePath = plyFile.absolutePath
@@ -297,11 +367,13 @@ class MainActivity : ComponentActivity() {
 
                                     runOnUiThread {
                                         activeSplatPoints = trainedPoints
+                                        activeMesh = null
                                         activeSession = recordingSession
                                         currentScreen = AppScreen.VIEWER
                                         scanPendingName = recordingSession
                                     }
                                 }
+                                } // end splat path
                             }
                         },
                         onBackClicked = {
@@ -321,7 +393,9 @@ class MainActivity : ComponentActivity() {
                         isTraining = trainingPhase,
                         trainingIteration = trainingIteration,
                         trainingTotalIterations = trainingTotalIterations,
-                        trainingLoss = trainingLoss
+                        trainingLoss = trainingLoss,
+                        titleText = if (processingIsPhotoMode) "Building Photo Mesh" else "Processing 3D Splat Model",
+                        pointCountLabel = if (processingIsPhotoMode) "Vertices" else "Gaussians"
                     )
                 }
 
@@ -331,6 +405,7 @@ class MainActivity : ComponentActivity() {
                         ViewerScreen(
                             session = sessionToView,
                             points = activeSplatPoints,
+                            mesh = activeMesh,
                             onBackClicked = {
                                 currentScreen = AppScreen.GALLERY
                                 refreshGallery()
@@ -373,6 +448,26 @@ class MainActivity : ComponentActivity() {
                     }
                 )
             }
+        }
+    }
+
+    /** Creates thumbnail.jpg from the first captured RGB frame; returns null on failure. */
+    private fun makeThumbnail(datasetDir: File): File? {
+        return try {
+            val firstRgbFile = datasetDir.listFiles { _, name -> name.startsWith("rgb_") && name.endsWith(".jpg") }
+                ?.minByOrNull { it.name.removePrefix("rgb_").removeSuffix(".jpg").toLongOrNull() ?: Long.MAX_VALUE }
+                ?: return null
+
+            val thumbFile = File(datasetDir, "thumbnail.jpg")
+            val bitmap = BitmapFactory.decodeFile(firstRgbFile.absolutePath) ?: return null
+            val scaled = Bitmap.createScaledBitmap(bitmap, 320, (320f * bitmap.height / bitmap.width).toInt(), true)
+            FileOutputStream(thumbFile).use { out -> scaled.compress(Bitmap.CompressFormat.JPEG, 85, out) }
+            bitmap.recycle()
+            scaled.recycle()
+            thumbFile
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to create thumbnail: ${e.message}")
+            null
         }
     }
 

@@ -12,10 +12,12 @@ data class ScanSession(
     var scanMode: ScanMode = ScanMode.OBJECT,
     var plyFilePath: String? = null,
     var splatFilePath: String? = null,
+    var meshFilePath: String? = null,
     var thumbnailPath: String? = null
 ) {
     fun getDatasetDir(): File = File(datasetDirPath)
     fun getPlyFile(): File? = plyFilePath?.let { File(it) }
     fun getSplatFile(): File? = splatFilePath?.let { File(it) }
+    fun getMeshFile(): File? = meshFilePath?.let { File(it) }
     fun getThumbnailFile(): File? = thumbnailPath?.let { File(it) }
 }

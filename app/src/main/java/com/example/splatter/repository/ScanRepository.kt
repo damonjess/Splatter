@@ -30,11 +30,23 @@ class ScanRepository(private val context: Context) {
 
             val plyFile = File(dir, "model.ply")
             val splatFile = File(dir, "model.splat")
+            val meshFile = File(dir, "model_mesh.ply")
 
             val poseCount = dir.listFiles { _, name -> name.startsWith("pose_") }?.size ?: 0
 
             var pointCount = 0
-            if (plyFile.exists()) {
+            if (meshFile.exists()) {
+                // Photo Mesh scan — read the vertex count straight from the header
+                // (bytes, never a Reader: the rest of the file is binary)
+                pointCount = try {
+                    val header = ByteArray(minOf(meshFile.length(), 2048L).toInt())
+                    java.io.FileInputStream(meshFile).use { it.read(header) }
+                    val text = String(header, Charsets.US_ASCII)
+                    Regex("element vertex (\\d+)").find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                } catch (_: Exception) {
+                    0
+                }
+            } else if (plyFile.exists()) {
                 // Estimate point count from PLY size or header
                 val sizeBytes = plyFile.length()
                 pointCount = ((sizeBytes - 400).coerceAtLeast(0) / 56).toInt()
@@ -58,6 +70,7 @@ class ScanRepository(private val context: Context) {
                     scanMode = scanMode,
                     plyFilePath = if (plyFile.exists()) plyFile.absolutePath else null,
                     splatFilePath = if (splatFile.exists()) splatFile.absolutePath else null,
+                    meshFilePath = if (meshFile.exists()) meshFile.absolutePath else null,
                     thumbnailPath = if (thumbFile.exists()) thumbFile.absolutePath else null
                 )
             )

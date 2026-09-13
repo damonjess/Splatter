@@ -97,6 +97,7 @@ object ScanQualityEvaluator {
         val basePoints = when (scanMode) {
             ScanMode.OBJECT -> 180_000
             ScanMode.ROOM -> 550_000
+            ScanMode.PHOTO -> 400_000
         }
         val coverageBoost = (depthCoveragePercent / 100f) * 1.4f
         val frameBoost = (frameCount.coerceAtMost(1200) / 1200f) * 0.8f
