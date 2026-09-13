@@ -88,7 +88,21 @@ object FrameProcessor {
             val step = 2
 
             if (depthFile.exists()) {
-                // Depth-based 3D unprojection
+                // Read exact depth dimensions saved at capture time (depthdims_*.txt)
+                // Falls back to pixel-count heuristic only if the file is missing
+                val depthDimsFile = File(datasetDir, "depthdims_$timestamp.txt")
+                var depthWidth = 0
+                var depthHeight = 0
+                if (depthDimsFile.exists()) {
+                    try {
+                        val dimsParts = depthDimsFile.readText().trim().split(",")
+                        if (dimsParts.size >= 2) {
+                            depthWidth = dimsParts[0].trim().toIntOrNull() ?: 0
+                            depthHeight = dimsParts[1].trim().toIntOrNull() ?: 0
+                        }
+                    } catch (_: Exception) { }
+                }
+                // Depth-based 3D unprojection (processFrameWithDepth has its own fallback if depth dims are 0)
                 processFrameWithDepth(
                     depthFile = depthFile,
                     bitmap = bitmap,
@@ -98,7 +112,9 @@ object FrameProcessor {
                     cx = cx,
                     cy = cy,
                     step = step,
-                    voxelGrid = voxelGrid
+                    voxelGrid = voxelGrid,
+                    depthWidth = depthWidth,
+                    depthHeight = depthHeight
                 )
             } else {
                 // Fallback for frames without raw depth (e.g. estimated plane unprojection)
@@ -144,7 +160,9 @@ object FrameProcessor {
         cx: Float,
         cy: Float,
         step: Int,
-        voxelGrid: HashMap<Long, SplatPoint>
+        voxelGrid: HashMap<Long, SplatPoint>,
+        depthWidth: Int,
+        depthHeight: Int
     ) {
         val depthBytes = depthFile.readBytes()
         if (depthBytes.isEmpty()) return
@@ -155,8 +173,9 @@ object FrameProcessor {
         val imgWidth = bitmap.width
         val imgHeight = bitmap.height
 
-        val depthWidth = if (depthPixelCount == 160 * 120) 160 else if (depthPixelCount == 640 * 480) 640 else 160
-        val depthHeight = if (depthWidth > 0) depthPixelCount / depthWidth else 120
+        // Use the exact depth dimensions passed in (from depthdims_*.txt or fallback)
+        val actualDepthWidth = if (depthWidth > 0) depthWidth else if (depthPixelCount == 160 * 120) 160 else if (depthPixelCount == 640 * 480) 640 else 160
+        val actualDepthHeight = if (depthHeight > 0) depthHeight else (depthPixelCount / actualDepthWidth)
 
         val depthFx = fx.coerceAtLeast(1f)
         val depthFy = fy.coerceAtLeast(1f)
@@ -168,9 +187,9 @@ object FrameProcessor {
         val rgbCx = imgWidth * 0.5f
         val rgbCy = imgHeight * 0.5f
 
-        for (v in 0 until depthHeight step step) {
-            for (u in 0 until depthWidth step step) {
-                val index = v * depthWidth + u
+        for (v in 0 until actualDepthHeight step step) {
+            for (u in 0 until actualDepthWidth step step) {
+                val index = v * actualDepthWidth + u
                 if (index >= depthPixelCount) continue
 
                 val depthMm = depthBuffer.get(index).toInt() and 0xFFFF
@@ -182,8 +201,8 @@ object FrameProcessor {
                 val rgbCoords = mapDepthToRgbPixel(
                     uDepth = u,
                     vDepth = v,
-                    depthWidth = depthWidth,
-                    depthHeight = depthHeight,
+                    depthWidth = actualDepthWidth,
+                    depthHeight = actualDepthHeight,
                     depthFx = depthFx,
                     depthFy = depthFy,
                     depthCx = depthCx,

@@ -1,9 +1,13 @@
 package com.example.splatter.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,7 +32,11 @@ import androidx.compose.ui.unit.sp
 fun ProcessingScreen(
     currentStep: String,
     progressPercent: Int,
-    pointCount: Int
+    pointCount: Int,
+    isTraining: Boolean = false,
+    trainingIteration: Int = 0,
+    trainingTotalIterations: Int = 0,
+    trainingLoss: Float = 0f
 ) {
     Box(
         modifier = Modifier
@@ -52,13 +60,13 @@ fun ProcessingScreen(
                 verticalArrangement = Arrangement.Center
             ) {
                 CircularProgressIndicator(
-                    color = Color(0xFF6200EE),
+                    color = if (isTraining) Color(0xFF03DAC6) else Color(0xFF6200EE),
                     strokeWidth = 4.dp,
                     modifier = Modifier.padding(bottom = 20.dp)
                 )
 
                 Text(
-                    text = "Processing 3D Splat Model",
+                    text = if (isTraining) "Training on Device" else "Processing 3D Splat Model",
                     color = Color.White,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
@@ -82,7 +90,7 @@ fun ProcessingScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(8.dp),
-                    color = Color(0xFFBB86FC),
+                    color = if (isTraining) Color(0xFF03DAC6) else Color(0xFFBB86FC),
                     trackColor = Color.White.copy(alpha = 0.1f)
                 )
 
@@ -98,11 +106,74 @@ fun ProcessingScreen(
                 if (pointCount > 0) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Gaussians generated: %,d".format(pointCount),
+                        text = "Gaussians: %,d".format(pointCount),
                         color = Color(0xFF03DAC6),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
                     )
+                }
+
+                // Training-specific info
+                AnimatedVisibility(
+                    visible = isTraining && trainingTotalIterations > 0,
+                    enter = fadeIn(),
+                    exit = fadeOut()
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Iteration",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 12.sp
+                            )
+                            Text(
+                                text = "$trainingIteration / $trainingTotalIterations",
+                                color = Color(0xFF03DAC6),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Loss",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 12.sp
+                            )
+                            Text(
+                                text = "%.4f".format(trainingLoss),
+                                color = if (trainingLoss < 0.15f) Color(0xFF4CAF50) else Color(0xFFFFC107),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Iteration progress bar
+                        if (trainingTotalIterations > 0) {
+                            LinearProgressIndicator(
+                                progress = { trainingIteration.toFloat() / trainingTotalIterations },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp),
+                                color = Color(0xFF03DAC6).copy(alpha = 0.6f),
+                                trackColor = Color.White.copy(alpha = 0.08f)
+                            )
+                        }
+                    }
                 }
             }
         }

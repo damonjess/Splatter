@@ -15,8 +15,8 @@ android {
         applicationId = "com.example.splatter"
         minSdk = 26
         targetSdk = 37
-        versionCode = 2
-        versionName = "1.1-magic8pro"
+        versionCode = 3
+        versionName = "1.2-magic8pro"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

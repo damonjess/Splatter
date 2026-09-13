@@ -35,6 +35,7 @@ import com.example.splatter.model.ScanQualityState
 import com.example.splatter.model.ScanSession
 import com.example.splatter.model.SplatPoint
 import com.example.splatter.processor.FrameProcessor
+import com.example.splatter.processor.GaussianSplatTrainer
 import com.example.splatter.processor.PlyExporter
 import com.example.splatter.processor.RoomReconstructionProcessor
 import com.example.splatter.repository.ScanRepository
@@ -105,6 +106,10 @@ class MainActivity : ComponentActivity() {
             var processingStepText by remember { mutableStateOf("Initializing...") }
             var processingPercent by remember { mutableIntStateOf(0) }
             var processingPointCount by remember { mutableIntStateOf(0) }
+            var trainingPhase by remember { mutableStateOf(false) }
+            var trainingIteration by remember { mutableIntStateOf(0) }
+            var trainingTotalIterations by remember { mutableIntStateOf(0) }
+            var trainingLoss by remember { mutableStateOf(0f) }
 
             var hasCameraPermission by remember {
                 mutableStateOf(
@@ -225,13 +230,39 @@ class MainActivity : ComponentActivity() {
                                         }
                                     )
 
+                                    // ---- On-device training (multi-view Gaussian refinement) ----
+                                    val mutablePoints = points.toMutableList()
+                                    runOnUiThread { trainingPhase = true }
+                                    val trainedPoints = try {
+                                        GaussianSplatTrainer.trainOnDevice(
+                                            initialPoints = mutablePoints,
+                                            datasetDir = File(recordingSession.datasetDirPath),
+                                            scanMode = recordingSession.scanMode,
+                                            onProgress = { progress ->
+                                                runOnUiThread {
+                                                    processingStepText = progress.currentStep
+                                                    processingPercent = progress.progressPercent
+                                                    processingPointCount = progress.pointCount
+                                                    trainingIteration = progress.iteration
+                                                    trainingTotalIterations = progress.totalIterations
+                                                    trainingLoss = progress.loss
+                                                }
+                                            }
+                                        )
+                                    } catch (e: Exception) {
+                                        Log.e("MainActivity", "Training failed, using untrained points", e)
+                                        points
+                                    } finally {
+                                        runOnUiThread { trainingPhase = false }
+                                    }
+
                                     val plyFile = File(recordingSession.datasetDirPath, "model.ply")
-                                    PlyExporter.exportToPly(points, plyFile)
+                                    PlyExporter.exportToPly(trainedPoints, plyFile)
 
                                     val splatFile = File(recordingSession.datasetDirPath, "model.splat")
-                                    PlyExporter.exportToSplat(points, splatFile)
+                                    PlyExporter.exportToSplat(trainedPoints, splatFile)
 
-                                    val reconstructedPlanes = RoomReconstructionProcessor.extractPlanes(points)
+                                    val reconstructedPlanes = RoomReconstructionProcessor.extractPlanes(trainedPoints)
                                     val planeObj = File(recordingSession.datasetDirPath, "room_planes.obj")
                                     planeObj.writeText(RoomReconstructionProcessor.exportPlanesAsObj(reconstructedPlanes))
                                     val planeSummary = File(recordingSession.datasetDirPath, "room_planes.txt")
@@ -260,12 +291,11 @@ class MainActivity : ComponentActivity() {
 
                                     recordingSession.plyFilePath = plyFile.absolutePath
                                     recordingSession.splatFilePath = splatFile.absolutePath
-                                    recordingSession.pointCount = points.size
-
-                                    activeSplatPoints = points
-                                    activeSession = recordingSession
+                                    recordingSession.pointCount = trainedPoints.size
 
                                     runOnUiThread {
+                                        activeSplatPoints = trainedPoints
+                                        activeSession = recordingSession
                                         currentScreen = AppScreen.VIEWER
                                         scanPendingName = recordingSession
                                     }
@@ -285,7 +315,11 @@ class MainActivity : ComponentActivity() {
                     ProcessingScreen(
                         currentStep = processingStepText,
                         progressPercent = processingPercent,
-                        pointCount = processingPointCount
+                        pointCount = processingPointCount,
+                        isTraining = trainingPhase,
+                        trainingIteration = trainingIteration,
+                        trainingTotalIterations = trainingTotalIterations,
+                        trainingLoss = trainingLoss
                     )
                 }
 
