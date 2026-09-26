@@ -1,7 +1,25 @@
-# Splatter — personal build for HONOR Magic 8 Pro (v1.3.1-magic8pro)
+# Splatter — personal build for HONOR Magic 8 Pro (v1.4-magic8pro)
 
 ## What this is
 A personal build of the open-source [Splatter](https://github.com/damonjess/Splatter) app: record a video-like scan with ARCore, and the phone reconstructs it on-device into a 3D splat/point cloud (PLY + .splat), viewable in the built-in 3D viewer. Built for a HONOR Magic 8 Pro, which is on [Google's official ARCore supported devices list](https://developers.google.com/ar/devices) with Depth API support, so raw depth capture works.
+
+## What's new in v1.4 — Photo SfM mode (true photo-only photogrammetry)
+
+Pick **🔭 Photo SfM** on the scan screen and reconstruction runs from the **photos alone** — no depth sensor involvement. This is the mode that works where raw depth fails: shiny, thin, dark, or transparent subjects.
+
+- **Feature detection & matching** — Shi-Tomasi corners (grid-spread, 800/frame) matched by census-signature shortlist + mutual-best check + NCC patch verification. Pure Kotlin, zero new dependencies.
+- **Incremental Structure-from-Motion** — RANSAC 8-point essential matrix seeds the reconstruction (custom one-sided-Jacobi SVD), then each further frame registers against an already-posed neighbour via essential matching + a 1D scale search over known 3D points, followed by a DLT PnP polish. Alternating pose/point refinement rounds tidy the map.
+- **Track building** — union-find linking over consecutive and short-range wider-baseline matches, deduped to one observation per frame, drift-bridging without poisoning tracks.
+- **Dense plane-sweep stereo** — per keyframe, census-consistency depth along rays sampled at 40 depths into up to 5 supporting views, with texture/flatness/boundary validation so blank regions don't fabricate surfaces.
+- **Mesh fusion & colors** — pseudo depth maps feed the same unit-tested DepthMeshFuser used by Photo Mesh (voxel dedup, depth-continuity, small-fragment cleanup), then MeshColorBaker bakes photo colors from all posed views.
+- **Exports** — same as Photo Mesh: `model_mesh.ply` + `model_mesh.obj`, savable/shareable.
+- **Covered by tests** — the whole geometry stack lives in the pure-Kotlin `processor/sfm` package, verified on JVM by synthetic-scene tests (analytic textured scene rendered from known poses: rotations, triangulation, two-view pose recovery with outlier rejection, full SfM registration, plane-sweep depth accuracy).
+
+### Tips for Photo SfM
+- Orbit **slowly** and keep **~60% view overlap** — SfM needs the same corners visible in 3+ views
+- Matte, textured subjects reconstruct best (it's still stereo — blank surfaces have nothing to match)
+- Expect cm-level detail at object distances (12 mm fusion voxel); the win is robustness, not resolution
+- Processing takes noticeably longer than Photo Mesh (SfM + sweeps on-device); watch the progress steps
 
 ## What's new in v1.3 — Photo Mesh mode (Polycam-style photogrammetry)
 
@@ -19,7 +37,7 @@ Pick **📷 Photo Mesh** on the scan screen and the app now produces a **texture
 - Matte, well-lit, non-reflective subjects reconstruct far better than shiny/dark ones (raw depth struggles with both)
 - 4 mm resolution is tuned for object-scale scans; a whole room will hit the 600k triangle cap and lose detail — use Room mode splats for room-scale captures
 
-Note: this is ARCore-assisted photogrammetry — camera poses come from AR tracking and the surface geometry comes from the raw depth sensor, then the captured photos are projected onto the fused mesh. Full photo-only SfM/MVS (no depth sensor) is not implemented; it would need significantly heavier on-device computation.
+Note: this is ARCore-assisted photogrammetry — camera poses come from AR tracking and the surface geometry comes from the raw depth sensor, then the captured photos are projected onto the fused mesh. For fully photo-only reconstruction, use the v1.4 **Photo SfM** mode above.
 
 ## What's new in v1.2 — On-device training
 After the scan finishes and the initial point cloud is unprojected, the app now runs an **on-device Gaussian splat training** pass before exporting the model. This iteratively refines splat parameters using multi-view observations from the captured frames:
@@ -55,6 +73,16 @@ This is not full differentiable 3DGS training (which requires CUDA-style differe
 2. Move slowly around the object, keeping 0.3–1.5 m away. Watch the status: "Ready (Tracking Locked)" means good tracking; "Searching for features" means slow down.
 3. Press stop when done — processing and training run on the phone, then the 3D model opens in the viewer.
 4. Models are stored in `Android/data/com.example.splatter/files/scans/` on your phone — each scan has `model.ply` (openable in most 3D/splat software) and `model.splat`.
+
+## How to view a finished model (Polycam-style)
+When processing finishes (or from the gallery), the model opens in the 3D viewer:
+- **One finger** — orbit around the object
+- **Two fingers** — pan the model across the screen
+- **Pinch** — zoom in/out
+- **Flick** — spins the model with momentum
+- **Spin button** — turntable auto-rotate (touch pauses it)
+- **Double-tap / Reset View** — snap back to the default framed view
+- **Wireframe** — inspect the mesh triangles
 
 ## Signing secrets (kept out of this repo)
 Release signing uses two files at the project root that are **git-ignored and never pushed**:

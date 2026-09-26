@@ -1,7 +1,6 @@
 package com.example.splatter.ui.screens
 
 import android.opengl.GLSurfaceView
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -217,7 +216,6 @@ fun ScanScreen(
                                                 )
                                         )
                                     }
-                                    gridCells.forEach { it }
                                 }
                             }
                         }
@@ -276,6 +274,7 @@ fun ScanScreen(
                                                 ScanMode.OBJECT -> "📦 Object"
                                                 ScanMode.ROOM -> "🏠 Room"
                                                 ScanMode.PHOTO -> "📷 Photo Mesh"
+                                                ScanMode.PHOTO_SFM -> "🔭 Photo SfM"
                                             },
                                             color = if (isSelected) Color.White else Color.White.copy(alpha = 0.6f),
                                             fontSize = 14.sp,
@@ -312,6 +311,7 @@ fun ScanScreen(
                                             ScanMode.OBJECT -> "4–6 mm"
                                             ScanMode.ROOM -> "10–20 mm"
                                             ScanMode.PHOTO -> "10 mm"
+                                            ScanMode.PHOTO_SFM -> "12 mm"
                                         }}",
                                         color = Color(0xFFBB86FC),
                                         fontSize = 12.sp,
@@ -349,6 +349,7 @@ fun ScanScreen(
                                     ScanMode.OBJECT -> "📦 OBJECT MODE (4–6mm Voxel)"
                                     ScanMode.ROOM -> "🏠 ROOM MODE (Floor/Wall Detection)"
                                     ScanMode.PHOTO -> "📷 PHOTO MESH MODE (Textured Mesh)"
+                                    ScanMode.PHOTO_SFM -> "🔭 PHOTO SfM MODE (Photo-Only Mesh)"
                                 },
                                 color = Color.White,
                                 fontSize = 12.sp,
@@ -365,12 +366,14 @@ fun ScanScreen(
                                     ScanMode.OBJECT -> "Move slowly around target object..."
                                     ScanMode.ROOM -> "Slowly scan walls, floor & room layout..."
                                     ScanMode.PHOTO -> "Orbit slowly — capture every side with overlap..."
+                                    ScanMode.PHOTO_SFM -> "Orbit slowly — 60% view overlap between frames..."
                                 }
                             } else {
                                 when (selectedMode) {
                                     ScanMode.OBJECT -> "Point at object (0.3–2.5m) and tap REC"
                                     ScanMode.ROOM -> "Point around room (0.5–5.0m) and tap REC"
                                     ScanMode.PHOTO -> "Point at subject (0.3–5m) and tap REC"
+                                    ScanMode.PHOTO_SFM -> "Point at subject (0.5–8m) and tap REC"
                                 }
                             },
                             color = Color.White.copy(alpha = 0.85f),

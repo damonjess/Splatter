@@ -1,12 +1,16 @@
 package com.example.splatter.repository
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.util.Log
 import com.example.splatter.model.ScanMode
 import com.example.splatter.model.ScanSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -52,7 +56,7 @@ class ScanRepository(private val context: Context) {
                 pointCount = ((sizeBytes - 400).coerceAtLeast(0) / 56).toInt()
             }
 
-            val thumbFile = File(dir, "thumbnail.jpg")
+            val thumbFile = ensureThumbnail(dir)
             val titleFile = File(dir, "title.txt")
             val title = if (titleFile.exists()) titleFile.readText().trim() else "Scan $formattedDate"
 
@@ -71,12 +75,45 @@ class ScanRepository(private val context: Context) {
                     plyFilePath = if (plyFile.exists()) plyFile.absolutePath else null,
                     splatFilePath = if (splatFile.exists()) splatFile.absolutePath else null,
                     meshFilePath = if (meshFile.exists()) meshFile.absolutePath else null,
-                    thumbnailPath = if (thumbFile.exists()) thumbFile.absolutePath else null
+                    thumbnailPath = thumbFile?.absolutePath
                 )
             )
         }
 
         sessions.sortedByDescending { it.timestamp }
+    }
+
+    private fun ensureThumbnail(datasetDir: File): File? {
+        val thumbFile = File(datasetDir, "thumbnail.jpg")
+        if (thumbFile.exists() && thumbFile.length() > 0) return thumbFile
+
+        val firstRgbFile = datasetDir.listFiles { _, name -> name.startsWith("rgb_") && name.endsWith(".jpg") }
+            ?.minByOrNull { it.name.removePrefix("rgb_").removeSuffix(".jpg").toLongOrNull() ?: Long.MAX_VALUE }
+            ?: return null
+
+        return try {
+            val bitmap = BitmapFactory.decodeFile(firstRgbFile.absolutePath) ?: return null
+            val orientedBmp = if (bitmap.width > bitmap.height) {
+                val matrix = Matrix().apply { postRotate(90f) }
+                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                bitmap.recycle()
+                rotated
+            } else {
+                bitmap
+            }
+
+            val targetWidth = 320
+            val targetHeight = (targetWidth.toFloat() * orientedBmp.height / orientedBmp.width).toInt()
+            val scaled = Bitmap.createScaledBitmap(orientedBmp, targetWidth, targetHeight, true)
+            if (scaled != orientedBmp) orientedBmp.recycle()
+
+            FileOutputStream(thumbFile).use { out -> scaled.compress(Bitmap.CompressFormat.JPEG, 85, out) }
+            scaled.recycle()
+            thumbFile
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to create thumbnail: ${e.message}")
+            null
+        }
     }
 
     suspend fun createNewScanSession(scanMode: ScanMode = ScanMode.OBJECT): ScanSession = withContext(Dispatchers.IO) {

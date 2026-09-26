@@ -15,8 +15,8 @@ android {
         applicationId = "com.example.splatter"
         minSdk = 26
         targetSdk = 37
-        versionCode = 3
-        versionName = "1.2-magic8pro"
+        versionCode = 4
+        versionName = "1.4-magic8pro"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -42,7 +42,7 @@ android {
     }
     buildTypes {
         release {
-            if (hasKeystore) signingConfig = signingConfigs.getByName("release")
+            signingConfig = if (hasKeystore) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
             optimization {
                 enable = false
             }

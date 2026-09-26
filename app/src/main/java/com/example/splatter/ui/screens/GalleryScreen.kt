@@ -27,7 +27,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -257,7 +256,7 @@ fun ScanItemCard(
     onRenameClick: () -> Unit
 ) {
     val context = LocalContext.current
-    val plyFile = remember(session.id) { session.getPlyFile() }
+    val plyFile = remember(session.id) { session.getMeshFile() ?: session.getPlyFile() }
     val hasPly = plyFile != null && plyFile.exists()
 
     Card(
@@ -333,7 +332,10 @@ fun ScanItemCard(
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text(
-                        text = if (session.scanMode == ScanMode.PHOTO) "%,d Vertices".format(session.pointCount) else "%,d Gaussians".format(session.pointCount),
+                        text = when (session.scanMode) {
+                            ScanMode.PHOTO, ScanMode.PHOTO_SFM -> "%,d Vertices".format(session.pointCount)
+                            else -> "%,d Gaussians".format(session.pointCount)
+                        },
                         color = Color(0xFF03DAC6),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
@@ -352,6 +354,7 @@ fun ScanItemCard(
                             ScanMode.OBJECT -> "📦 Object"
                             ScanMode.ROOM -> "🏠 Room"
                             ScanMode.PHOTO -> "📷 Photo Mesh"
+                            ScanMode.PHOTO_SFM -> "🔭 Photo SfM"
                         },
                         color = Color(0xFFBB86FC),
                         fontSize = 12.sp,
@@ -386,13 +389,20 @@ fun ScanItemCard(
             ) {
                 Button(
                     onClick = onOpen,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFBB86FC)),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (hasPly) Color(0xFFBB86FC) else Color(0xFFFF9800)
+                    ),
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier
                         .weight(1f)
                         .height(38.dp)
                 ) {
-                    Text("View 3D", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text(
+                        if (hasPly) "View 3D" else "⚡ Process 3D",
+                        color = Color.Black,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
                 }
 
                 Button(

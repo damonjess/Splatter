@@ -47,6 +47,22 @@ enum class ScanMode(
         detailLevelText = "Textured triangle mesh (photogrammetry-style)",
         scanDurationText = "Orbit slowly for full coverage",
         description = "0.3–5.0 m depth • 4 mm fusion voxel • Textured photo mesh • PLY + OBJ export"
+    ),
+    PHOTO_SFM(
+        id = "PHOTO_SFM",
+        displayName = "Photo SfM",
+        minDepthMeters = 0.5f,
+        maxDepthMeters = 8.0f,
+        // Coarser than PHOTO: dense depth comes from plane-sweep stereo over
+        // 640px keyframes, so per-frame depth precision is ~cm-level at 2 m.
+        // A 5 mm voxel would shred into degenerate triangles like the v1.3
+        // depth-assisted bug — 12 mm keeps quad corners resolvable.
+        voxelSizeMeters = 0.012f,
+        maxPointLimit = 1_500_000,
+        enablePlaneDetection = false,
+        detailLevelText = "Photo-only SfM + plane-sweep mesh (no depth sensor)",
+        scanDurationText = "Orbit slowly, keep overlap between views",
+        description = "0.5–8.0 m depth • 12 mm fusion voxel • Works where depth sensor fails (shiny/thin/dark) • PLY + OBJ export"
     );
 
     companion object {

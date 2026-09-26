@@ -1,6 +1,5 @@
 package com.example.splatter.ui.screens
 
-import android.content.Intent
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -70,6 +69,7 @@ fun MeshViewerScreen(
 ) {
     val context = LocalContext.current
     var wireframe by remember { mutableStateOf(false) }
+    var autoRotate by remember { mutableStateOf(false) }
     var meshViewRef: MeshView? by remember { mutableStateOf(null) }
 
     LaunchedEffect(mesh) {
@@ -170,28 +170,48 @@ fun MeshViewerScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Photo Mesh",
+                        text = session.scanMode.displayName,
                         color = Color.White,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium
                     )
 
-                    Button(
-                        onClick = {
-                            wireframe = !wireframe
-                            meshViewRef?.setWireframe(wireframe)
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (wireframe) Color(0xFF03DAC6) else Color.White.copy(alpha = 0.15f)
-                        ),
-                        shape = CircleShape,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            if (wireframe) "Wireframe: On" else "Wireframe: Off",
-                            color = if (wireframe) Color.Black else Color.White,
-                            fontSize = 12.sp
-                        )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                autoRotate = !autoRotate
+                                meshViewRef?.setAutoRotate(autoRotate)
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (autoRotate) Color(0xFF03DAC6) else Color.White.copy(alpha = 0.15f)
+                            ),
+                            shape = CircleShape,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                if (autoRotate) "Spin: On" else "Spin",
+                                color = if (autoRotate) Color.Black else Color.White,
+                                fontSize = 12.sp
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                wireframe = !wireframe
+                                meshViewRef?.setWireframe(wireframe)
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (wireframe) Color(0xFF03DAC6) else Color.White.copy(alpha = 0.15f)
+                            ),
+                            shape = CircleShape,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                if (wireframe) "Wire: On" else "Wireframe",
+                                color = if (wireframe) Color.Black else Color.White,
+                                fontSize = 12.sp
+                            )
+                        }
                     }
                 }
 
@@ -203,6 +223,7 @@ fun MeshViewerScreen(
                 ) {
                     Button(
                         onClick = {
+                            autoRotate = false
                             meshViewRef?.resetCamera()
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.15f)),
