@@ -10,6 +10,8 @@ import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.util.Log
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -53,6 +55,7 @@ import com.example.splatter.util.ScanQualityEvaluator
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Coordinates2d
+import com.google.ar.core.Frame
 import com.google.ar.core.Plane
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
@@ -62,8 +65,10 @@ import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import kotlin.math.sqrt
 
 enum class AppScreen {
     GALLERY,
@@ -74,8 +79,13 @@ enum class AppScreen {
 
 class MainActivity : ComponentActivity() {
 
+    private companion object {
+        private const val TAG = "MainActivity"
+    }
+
     private var session: Session? = null
     private var glSurfaceView: GLSurfaceView? = null
+    private var arCameraRenderer: ARCameraRenderer? = null
     private var userRequestedInstall = true
 
     private lateinit var repository: ScanRepository
@@ -85,19 +95,18 @@ class MainActivity : ComponentActivity() {
     private val frameCountState = mutableStateOf(0)
     private val trackingStatusText = mutableStateOf("Initializing AR...")
     private val scanQualityState = mutableStateOf(ScanQualityState())
+    private val pendingManualCapture = AtomicBoolean(false)
 
     private var currentActiveSession: ScanSession? = null
     private var lastCameraPosition: FloatArray? = null
     private var scanStartedAtMs: Long = 0L
 
     private var lastSavedTimestampMs = 0L
-    // Tuned for HONOR Magic 8 Pro (flagship SoC + UFS storage): ~10 captures per second
     private val captureIntervalMs = 100L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Keep the screen awake while scanning/viewing (personal scanning device)
-        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         repository = ScanRepository(applicationContext)
 
         setContent {
@@ -141,6 +150,188 @@ class MainActivity : ComponentActivity() {
             fun refreshGallery() {
                 lifecycleScope.launch {
                     scanSessions = repository.getScanSessions()
+                }
+            }
+
+            fun finishAndProcessScan() {
+                isRecordingState.value = false
+                val recordingSession = currentActiveSession ?: return
+                val capturedCount = frameCountState.value
+
+                if (capturedCount == 0) {
+                    Toast.makeText(this@MainActivity, "No photos captured yet!", Toast.LENGTH_SHORT).show()
+                    return
+                }
+
+                if (recordingSession.scanMode == ScanMode.PHOTO_SFM && capturedCount < 6) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Photo SfM requires at least 6 photos (captured $capturedCount). Snap a few more with 60%+ overlap!",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return
+                }
+
+                currentScreen = AppScreen.PROCESSING
+                val photoMode = recordingSession.scanMode == ScanMode.PHOTO
+                val photoSfmMode = recordingSession.scanMode == ScanMode.PHOTO_SFM
+                processingIsPhotoMode = photoMode || photoSfmMode
+
+                if (photoSfmMode) {
+                    lifecycleScope.launch(Dispatchers.Default) {
+                        val datasetDir = File(recordingSession.datasetDirPath)
+                        val mesh = SfmProcessor.process(
+                            datasetDir = datasetDir,
+                            scanMode = recordingSession.scanMode,
+                            onProgress = { progress ->
+                                runOnUiThread {
+                                    processingStepText = progress.currentStep
+                                    processingPercent = progress.progressPercent
+                                    processingPointCount = progress.pointCount
+                                }
+                            }
+                        )
+
+                        if (mesh == null) {
+                            runOnUiThread {
+                                currentScreen = AppScreen.GALLERY
+                                scanPendingName = null
+                                processingIsPhotoMode = false
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Photo SfM failed — need more texture/overlap: orbit subject with 60%+ overlap",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                refreshGallery()
+                            }
+                            return@launch
+                        }
+
+                        val meshPlyFile = MeshExporter.exportMeshFiles(mesh, datasetDir)
+                        makeThumbnail(datasetDir)?.let { thumbFile ->
+                            recordingSession.thumbnailPath = thumbFile.absolutePath
+                        }
+
+                        recordingSession.meshFilePath = meshPlyFile?.absolutePath
+                        recordingSession.pointCount = mesh.vertexCount
+
+                        runOnUiThread {
+                            activeMesh = mesh
+                            activeSplatPoints = emptyList()
+                            activeSession = recordingSession
+                            currentScreen = AppScreen.VIEWER
+                            scanPendingName = recordingSession
+                            processingIsPhotoMode = false
+                        }
+                    }
+                } else if (photoMode) {
+                    lifecycleScope.launch(Dispatchers.Default) {
+                        val datasetDir = File(recordingSession.datasetDirPath)
+                        val mesh = PhotogrammetryProcessor.process(
+                            datasetDir = datasetDir,
+                            scanMode = recordingSession.scanMode,
+                            onProgress = { progress ->
+                                runOnUiThread {
+                                    processingStepText = progress.currentStep
+                                    processingPercent = progress.progressPercent
+                                    processingPointCount = progress.pointCount
+                                }
+                            }
+                        )
+
+                        if (mesh == null) {
+                            runOnUiThread {
+                                currentScreen = AppScreen.GALLERY
+                                scanPendingName = null
+                                processingIsPhotoMode = false
+                                Toast.makeText(this@MainActivity, "Photo mesh failed — not enough depth data captured", Toast.LENGTH_LONG).show()
+                                refreshGallery()
+                            }
+                            return@launch
+                        }
+
+                        val meshPlyFile = MeshExporter.exportMeshFiles(mesh, datasetDir)
+                        makeThumbnail(datasetDir)?.let { thumbFile ->
+                            recordingSession.thumbnailPath = thumbFile.absolutePath
+                        }
+
+                        recordingSession.meshFilePath = meshPlyFile?.absolutePath
+                        recordingSession.pointCount = mesh.vertexCount
+
+                        runOnUiThread {
+                            activeMesh = mesh
+                            activeSplatPoints = emptyList()
+                            activeSession = recordingSession
+                            currentScreen = AppScreen.VIEWER
+                            scanPendingName = recordingSession
+                            processingIsPhotoMode = false
+                        }
+                    }
+                } else {
+                    lifecycleScope.launch(Dispatchers.Default) {
+                        val points = FrameProcessor.processDataset(
+                            datasetDir = File(recordingSession.datasetDirPath),
+                            scanMode = recordingSession.scanMode,
+                            onProgress = { progress ->
+                                runOnUiThread {
+                                    processingStepText = progress.currentStep
+                                    processingPercent = progress.progressPercent
+                                    processingPointCount = progress.pointCount
+                                }
+                            }
+                        )
+
+                        runOnUiThread { trainingPhase = true }
+                        val trainedPoints = try {
+                            GaussianSplatTrainer.trainOnDevice(
+                                initialPoints = points,
+                                datasetDir = File(recordingSession.datasetDirPath),
+                                scanMode = recordingSession.scanMode,
+                                onProgress = { progress ->
+                                    runOnUiThread {
+                                        processingStepText = progress.currentStep
+                                        processingPercent = progress.progressPercent
+                                        processingPointCount = progress.pointCount
+                                        trainingIteration = progress.iteration
+                                        trainingTotalIterations = progress.totalIterations
+                                        trainingLoss = progress.loss
+                                    }
+                                }
+                            )
+                        } catch (e: Exception) {
+                            Log.e("MainActivity", "Training failed, using untrained points", e)
+                            points.toList()
+                        } finally {
+                            runOnUiThread { trainingPhase = false }
+                        }
+
+                        val plyFile = File(recordingSession.datasetDirPath, "model.ply")
+                        PlyExporter.exportToPly(trainedPoints, plyFile)
+
+                        val splatFile = File(recordingSession.datasetDirPath, "model.splat")
+                        PlyExporter.exportToSplat(trainedPoints, splatFile)
+
+                        val reconstructedPlanes = RoomReconstructionProcessor.extractPlanes(trainedPoints)
+                        val planeObj = File(recordingSession.datasetDirPath, "room_planes.obj")
+                        planeObj.writeText(RoomReconstructionProcessor.exportPlanesAsObj(reconstructedPlanes))
+
+                        val datasetDir = File(recordingSession.datasetDirPath)
+                        makeThumbnail(datasetDir)?.let { thumbFile ->
+                            recordingSession.thumbnailPath = thumbFile.absolutePath
+                        }
+
+                        recordingSession.plyFilePath = plyFile.absolutePath
+                        recordingSession.splatFilePath = splatFile.absolutePath
+                        recordingSession.pointCount = trainedPoints.size
+
+                        runOnUiThread {
+                            activeSplatPoints = trainedPoints
+                            activeMesh = null
+                            activeSession = recordingSession
+                            currentScreen = AppScreen.VIEWER
+                            scanPendingName = recordingSession
+                        }
+                    }
                 }
             }
 
@@ -322,7 +513,6 @@ class MainActivity : ComponentActivity() {
                         onOpenSession = { selectedSession ->
                             val meshFile = selectedSession.getMeshFile()
                             if (meshFile != null && meshFile.exists()) {
-                                // Photo Mesh scan
                                 activeSession = selectedSession
                                 processingIsPhotoMode = true
                                 currentScreen = AppScreen.PROCESSING
@@ -345,26 +535,26 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             } else {
-                            val plyFile = selectedSession.getPlyFile()
-                            if (plyFile != null && plyFile.exists()) {
-                                activeSession = selectedSession
-                                processingIsPhotoMode = false
-                                activeMesh = null
-                                currentScreen = AppScreen.PROCESSING
-                                processingStepText = "Loading 3D Gaussian Splat model..."
-                                processingPercent = 40
-                                processingPointCount = selectedSession.pointCount
+                                val plyFile = selectedSession.getPlyFile()
+                                if (plyFile != null && plyFile.exists()) {
+                                    activeSession = selectedSession
+                                    processingIsPhotoMode = false
+                                    activeMesh = null
+                                    currentScreen = AppScreen.PROCESSING
+                                    processingStepText = "Loading 3D Gaussian Splat model..."
+                                    processingPercent = 40
+                                    processingPointCount = selectedSession.pointCount
 
-                                lifecycleScope.launch(Dispatchers.Default) {
-                                    val points = PlyExporter.loadPlyFile(plyFile)
-                                    activeSplatPoints = points
-                                    runOnUiThread {
-                                        currentScreen = AppScreen.VIEWER
+                                    lifecycleScope.launch(Dispatchers.Default) {
+                                        val points = PlyExporter.loadPlyFile(plyFile)
+                                        activeSplatPoints = points
+                                        runOnUiThread {
+                                            currentScreen = AppScreen.VIEWER
+                                        }
                                     }
+                                } else {
+                                    processExistingSession(selectedSession)
                                 }
-                            } else {
-                                processExistingSession(selectedSession)
-                            }
                             }
                         },
                         onDeleteSession = { sessionToDelete ->
@@ -398,194 +588,47 @@ class MainActivity : ComponentActivity() {
                         frameCount = frameCountState.value,
                         statusText = trackingStatusText.value,
                         scanQuality = scanQualityState.value,
+                        onTakeSinglePhoto = {
+                            lifecycleScope.launch {
+                                if (currentActiveSession == null) {
+                                    val newSession = repository.createNewScanSession(scanMode = selectedScanMode)
+                                    currentActiveSession = newSession
+                                    activeSession = newSession
+                                    frameCountState.value = 0
+                                    isRecordingState.value = false
+                                    scanStartedAtMs = System.currentTimeMillis()
+                                    lastCameraPosition = null
+                                    scanQualityState.value = ScanQualityState(frameCount = 0)
+                                    checkAndInitAR()
+                                }
+                                pendingManualCapture.set(true)
+                            }
+                        },
                         onToggleRecording = {
                             val willRecord = !isRecordingState.value
                             if (willRecord) {
-                                frameCountState.value = 0
-                                scanStartedAtMs = System.currentTimeMillis()
-                                lastCameraPosition = null
-                                scanQualityState.value = ScanQualityState(frameCount = 0)
-                                isRecordingState.value = true
-                            } else {
-                                // STOP recording and process session
-                                isRecordingState.value = false
-                                val recordingSession = currentActiveSession ?: return@ScanScreen
-                                currentScreen = AppScreen.PROCESSING
-                                val photoMode = recordingSession.scanMode == ScanMode.PHOTO
-                                val photoSfmMode = recordingSession.scanMode == ScanMode.PHOTO_SFM
-                                processingIsPhotoMode = photoMode || photoSfmMode
-
-                                if (photoSfmMode) {
-                                    // ---- Photo SfM (photo-only photogrammetry) ----
-                                    lifecycleScope.launch(Dispatchers.Default) {
-                                        val datasetDir = File(recordingSession.datasetDirPath)
-                                        val mesh = SfmProcessor.process(
-                                            datasetDir = datasetDir,
-                                            scanMode = recordingSession.scanMode,
-                                            onProgress = { progress ->
-                                                runOnUiThread {
-                                                    processingStepText = progress.currentStep
-                                                    processingPercent = progress.progressPercent
-                                                    processingPointCount = progress.pointCount
-                                                }
-                                            }
-                                        )
-
-                                        if (mesh == null) {
-                                            runOnUiThread {
-                                                currentScreen = AppScreen.GALLERY
-                                                scanPendingName = null
-                                                processingIsPhotoMode = false
-                                                Toast.makeText(
-                                                    this@MainActivity,
-                                                    "Photo SfM failed — need more texture/overlap: orbit slower with 60%+ overlap",
-                                                    Toast.LENGTH_LONG
-                                                ).show()
-                                                refreshGallery()
-                                            }
-                                            return@launch
-                                        }
-
-                                        val meshPlyFile = MeshExporter.exportMeshFiles(mesh, datasetDir)
-                                        makeThumbnail(datasetDir)?.let { thumbFile ->
-                                            recordingSession.thumbnailPath = thumbFile.absolutePath
-                                        }
-
-                                        recordingSession.meshFilePath = meshPlyFile?.absolutePath
-                                        recordingSession.pointCount = mesh.vertexCount
-
-                                        runOnUiThread {
-                                            activeMesh = mesh
-                                            activeSplatPoints = emptyList()
-                                            activeSession = recordingSession
-                                            currentScreen = AppScreen.VIEWER
-                                            scanPendingName = recordingSession
-                                            processingIsPhotoMode = false
-                                        }
-                                    }
-                                } else if (photoMode) {
-                                    // ---- Photo Mesh (photogrammetry-style) pipeline ----
-                                    lifecycleScope.launch(Dispatchers.Default) {
-                                        val datasetDir = File(recordingSession.datasetDirPath)
-                                        val mesh = PhotogrammetryProcessor.process(
-                                            datasetDir = datasetDir,
-                                            scanMode = recordingSession.scanMode,
-                                            onProgress = { progress ->
-                                                runOnUiThread {
-                                                    processingStepText = progress.currentStep
-                                                    processingPercent = progress.progressPercent
-                                                    processingPointCount = progress.pointCount
-                                                }
-                                            }
-                                        )
-
-                                        if (mesh == null) {
-                                            runOnUiThread {
-                                                currentScreen = AppScreen.GALLERY
-                                                scanPendingName = null
-                                                processingIsPhotoMode = false
-                                                Toast.makeText(this@MainActivity, "Photo mesh failed — not enough depth data captured", Toast.LENGTH_LONG).show()
-                                                refreshGallery()
-                                            }
-                                            return@launch
-                                        }
-
-                                        val meshPlyFile = MeshExporter.exportMeshFiles(mesh, datasetDir)
-                                        makeThumbnail(datasetDir)?.let { thumbFile ->
-                                            recordingSession.thumbnailPath = thumbFile.absolutePath
-                                        }
-
-                                        recordingSession.meshFilePath = meshPlyFile?.absolutePath
-                                        recordingSession.pointCount = mesh.vertexCount
-
-                                        runOnUiThread {
-                                            activeMesh = mesh
-                                            activeSplatPoints = emptyList()
-                                            activeSession = recordingSession
-                                            currentScreen = AppScreen.VIEWER
-                                            scanPendingName = recordingSession
-                                            processingIsPhotoMode = false
-                                        }
+                                if (currentActiveSession == null) {
+                                    lifecycleScope.launch {
+                                        val newSession = repository.createNewScanSession(scanMode = selectedScanMode)
+                                        currentActiveSession = newSession
+                                        activeSession = newSession
+                                        frameCountState.value = 0
+                                        scanStartedAtMs = System.currentTimeMillis()
+                                        lastCameraPosition = null
+                                        scanQualityState.value = ScanQualityState(frameCount = 0)
+                                        isRecordingState.value = true
+                                        checkAndInitAR()
                                     }
                                 } else {
-
-                                lifecycleScope.launch(Dispatchers.Default) {
-                                    val points = FrameProcessor.processDataset(
-                                        datasetDir = File(recordingSession.datasetDirPath),
-                                        scanMode = recordingSession.scanMode,
-                                        onProgress = { progress ->
-                                            runOnUiThread {
-                                                processingStepText = progress.currentStep
-                                                processingPercent = progress.progressPercent
-                                                processingPointCount = progress.pointCount
-                                            }
-                                        }
-                                    )
-
-                                    // ---- On-device training (multi-view Gaussian refinement) ----
-                                    // processDataset already returns a MutableList; pass it directly to avoid
-                                    // an unnecessary copy that doubles memory at the critical unprojection→training
-                                    // transition (this is where the OOM crash at ~78% was occurring).
-                                    runOnUiThread { trainingPhase = true }
-                                    val trainedPoints = try {
-                                        GaussianSplatTrainer.trainOnDevice(
-                                            initialPoints = points,
-                                            datasetDir = File(recordingSession.datasetDirPath),
-                                            scanMode = recordingSession.scanMode,
-                                            onProgress = { progress ->
-                                                runOnUiThread {
-                                                    processingStepText = progress.currentStep
-                                                    processingPercent = progress.progressPercent
-                                                    processingPointCount = progress.pointCount
-                                                    trainingIteration = progress.iteration
-                                                    trainingTotalIterations = progress.totalIterations
-                                                    trainingLoss = progress.loss
-                                                }
-                                            }
-                                        )
-                                    } catch (e: Exception) {
-                                        Log.e("MainActivity", "Training failed, using untrained points", e)
-                                        points.toList()
-                                    } finally {
-                                        runOnUiThread { trainingPhase = false }
-                                    }
-
-                                    val plyFile = File(recordingSession.datasetDirPath, "model.ply")
-                                    PlyExporter.exportToPly(trainedPoints, plyFile)
-
-                                    val splatFile = File(recordingSession.datasetDirPath, "model.splat")
-                                    PlyExporter.exportToSplat(trainedPoints, splatFile)
-
-                                    val reconstructedPlanes = RoomReconstructionProcessor.extractPlanes(trainedPoints)
-                                    val planeObj = File(recordingSession.datasetDirPath, "room_planes.obj")
-                                    planeObj.writeText(RoomReconstructionProcessor.exportPlanesAsObj(reconstructedPlanes))
-                                    val planeSummary = File(recordingSession.datasetDirPath, "room_planes.txt")
-                                    planeSummary.writeText(
-                                        reconstructedPlanes.joinToString("\n") { plane ->
-                                            "${plane.type.name}: center=(${plane.centerX}, ${plane.centerY}, ${plane.centerZ}), normal=(${plane.normalX}, ${plane.normalY}, ${plane.normalZ}), inliers=${plane.inlierCount}"
-                                        }
-                                    )
-
-                                    // Grab the first captured RGB frame as a thumbnail
-                                    val datasetDir = File(recordingSession.datasetDirPath)
-                                    makeThumbnail(datasetDir)?.let { thumbFile ->
-                                        recordingSession.thumbnailPath = thumbFile.absolutePath
-                                    }
-
-                                    recordingSession.plyFilePath = plyFile.absolutePath
-                                    recordingSession.splatFilePath = splatFile.absolutePath
-                                    recordingSession.pointCount = trainedPoints.size
-
-                                    runOnUiThread {
-                                        activeSplatPoints = trainedPoints
-                                        activeMesh = null
-                                        activeSession = recordingSession
-                                        currentScreen = AppScreen.VIEWER
-                                        scanPendingName = recordingSession
-                                    }
+                                    scanStartedAtMs = System.currentTimeMillis()
+                                    isRecordingState.value = true
                                 }
-                                } // end splat path
+                            } else {
+                                finishAndProcessScan()
                             }
+                        },
+                        onFinishScan = {
+                            finishAndProcessScan()
                         },
                         onBackClicked = {
                             isRecordingState.value = false
@@ -694,10 +737,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-
-
-
-
     private fun checkAndInitAR() {
         try {
             if (session == null) {
@@ -728,13 +767,18 @@ class MainActivity : ComponentActivity() {
                     else -> Config.DepthMode.DISABLED
                 }
                 planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
-                focusMode = Config.FocusMode.FIXED
+                focusMode = try {
+                    Config.FocusMode.AUTO
+                } catch (_: Exception) {
+                    Config.FocusMode.FIXED
+                }
                 updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
             }
             arSession.configure(config)
             arSession.resume()
             session = arSession
-            Log.i(TAG, "AR Session created successfully with depthMode: ${config.depthMode}, planeFindingMode: ${config.planeFindingMode}")
+            arCameraRenderer?.resetTextureBinding()
+            Log.i(TAG, "AR Session created successfully with depthMode: ${config.depthMode}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create AR session: ${e.message}", e)
             trackingStatusText.value = "Failed: ${e.message}"
@@ -743,12 +787,14 @@ class MainActivity : ComponentActivity() {
 
     private fun getOrCreateGLSurfaceView(): GLSurfaceView {
         if (glSurfaceView == null) {
+            val renderer = ARCameraRenderer().also { arCameraRenderer = it }
             glSurfaceView = GLSurfaceView(this).apply {
                 setEGLContextClientVersion(2)
-                setRenderer(ARCameraRenderer())
+                setRenderer(renderer)
                 renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
             }
         }
+        (glSurfaceView?.parent as? ViewGroup)?.removeView(glSurfaceView)
         return glSurfaceView!!
     }
 
@@ -778,10 +824,16 @@ class MainActivity : ComponentActivity() {
 
     private inner class ARCameraRenderer : GLSurfaceView.Renderer {
         private var textureId = -1
+        @Volatile
         private var isTextureBoundToSession = false
         private var quadProgram = 0
         private var positionAttrib = 0
         private var texCoordAttrib = 0
+        private var texUniform = -1
+
+        fun resetTextureBinding() {
+            isTextureBoundToSession = false
+        }
 
         private val vertices = floatArrayOf(
             -1f, -1f,  1f, -1f,
@@ -822,6 +874,7 @@ class MainActivity : ComponentActivity() {
 
             positionAttrib = GLES20.glGetAttribLocation(quadProgram, "p")
             texCoordAttrib = GLES20.glGetAttribLocation(quadProgram, "t")
+            texUniform = GLES20.glGetUniformLocation(quadProgram, "tex")
             isTextureBoundToSession = false
         }
 
@@ -850,6 +903,10 @@ class MainActivity : ComponentActivity() {
             try {
                 val frame = activeSession.update()
 
+                // Crucial fix: rewind FloatBuffer positions before transformCoordinates2d
+                vertexBuffer.position(0)
+                transformedTexCoordBuffer.position(0)
+
                 frame.transformCoordinates2d(
                     Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
                     vertexBuffer,
@@ -857,9 +914,16 @@ class MainActivity : ComponentActivity() {
                     transformedTexCoordBuffer
                 )
 
+                // Rewind FloatBuffers after transformation so glVertexAttribPointer reads from index 0!
+                vertexBuffer.position(0)
+                transformedTexCoordBuffer.position(0)
+
                 GLES20.glUseProgram(quadProgram)
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
+                if (texUniform != -1) {
+                    GLES20.glUniform1i(texUniform, 0)
+                }
 
                 GLES20.glEnableVertexAttribArray(positionAttrib)
                 GLES20.glVertexAttribPointer(positionAttrib, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
@@ -887,7 +951,7 @@ class MainActivity : ComponentActivity() {
                     val dx = currentPose[0] - lastCameraPosition!![0]
                     val dy = currentPose[1] - lastCameraPosition!![1]
                     val dz = currentPose[2] - lastCameraPosition!![2]
-                    kotlin.math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
+                    sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
                 } else 0f
                 lastCameraPosition = currentPose.clone()
 
@@ -910,6 +974,8 @@ class MainActivity : ComponentActivity() {
                             if (isRecordingState.value) {
                                 val modeName = currentActiveSession?.scanMode?.displayName ?: "Scan"
                                 if (planeCount > 0) "Capturing $modeName ($planeCount planes tracked)" else "Capturing $modeName..."
+                            } else if (frameCountState.value > 0) {
+                                "Captured ${frameCountState.value} photos"
                             } else {
                                 if (planeCount > 0) "Ready ($planeCount floor/wall planes detected)" else "Ready (Tracking Locked)"
                             }
@@ -923,17 +989,23 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                // CRITICAL FIX: Only save frames when tracking is actively TRACKING
                 val now = System.currentTimeMillis()
-                if (isRecordingState.value &&
-                    trackingState == TrackingState.TRACKING &&
-                    (now - lastSavedTimestampMs >= captureIntervalMs)
-                ) {
+                val isManual = pendingManualCapture.compareAndSet(true, false)
+                val isAutoRec = isRecordingState.value && (now - lastSavedTimestampMs >= captureIntervalMs)
+
+                if ((isManual || isAutoRec) && trackingState == TrackingState.TRACKING) {
                     lastSavedTimestampMs = now
                     currentActiveSession?.let { activeScan ->
                         val targetDir = File(activeScan.datasetDirPath)
-                        FrameSaver.saveFrameData(frame, now, targetDir)
-                        runOnUiThread { frameCountState.value += 1 }
+                        val saved = FrameSaver.saveFrameData(frame, now, targetDir)
+                        if (saved) {
+                            runOnUiThread {
+                                frameCountState.value += 1
+                                if (isManual) {
+                                    Toast.makeText(this@MainActivity, "📸 Photo ${frameCountState.value} captured!", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -942,12 +1014,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun estimateDepthCoveragePercent(frame: com.google.ar.core.Frame): Int {
+    private fun estimateDepthCoveragePercent(frame: Frame): Int {
         return try {
             val depthImage = frame.acquireRawDepthImage16Bits()
             val depthBuffer = depthImage.planes[0].buffer
             val totalPixels = depthImage.width * depthImage.height
-            val shortBuffer = depthBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            val shortBuffer = depthBuffer.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
             var validPixels = 0
             for (i in 0 until shortBuffer.remaining()) {
                 val depthMm = shortBuffer.get(i).toInt() and 0xFFFF
@@ -960,49 +1032,49 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun estimateBrightness(frame: com.google.ar.core.Frame): Float {
+    private fun estimateBrightness(frame: Frame): Float {
         return try {
-            val image = frame.acquireCameraImage()
-            val yPlane = image.planes[0]
-            val buffer = yPlane.buffer
-            val bytes = ByteArray(buffer.remaining())
-            buffer.get(bytes)
-            var sum = 0
-            var count = 0
-            val step = maxOf(1, bytes.size / 2048)
-            for (i in bytes.indices step step) {
-                sum += (bytes[i].toInt() and 0xFF)
-                count++
+            val cameraImage = frame.acquireCameraImage()
+            val plane = cameraImage.planes[0].buffer
+            var totalBrightness = 0L
+            val pixelCount = plane.remaining()
+            val sampleStep = maxOf(1, pixelCount / 1000)
+            var samples = 0
+            var i = 0
+            while (i < pixelCount) {
+                totalBrightness += (plane.get(i).toInt() and 0xFF)
+                samples++
+                i += sampleStep
             }
-            image.close()
-            if (count == 0) 80f else (sum / count.toFloat())
+            cameraImage.close()
+            if (samples > 0) (totalBrightness.toFloat() / samples.toFloat()) else 128f
         } catch (_: Exception) {
-            80f
+            128f
         }
     }
 
-    private fun estimateDistanceMeters(frame: com.google.ar.core.Frame): Float {
+    private fun estimateDistanceMeters(frame: Frame): Float {
         return try {
             val depthImage = frame.acquireRawDepthImage16Bits()
             val depthBuffer = depthImage.planes[0].buffer
-            val shortBuffer = depthBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-            var sumDepthMm = 0
+            val shortBuffer = depthBuffer.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            var sumDepthMm = 0L
             var validPixels = 0
-            for (i in 0 until shortBuffer.remaining()) {
+            val pixelCount = shortBuffer.remaining()
+            val sampleStep = maxOf(1, pixelCount / 1000)
+            var i = 0
+            while (i < pixelCount) {
                 val depthMm = shortBuffer.get(i).toInt() and 0xFFFF
-                if (depthMm > 0) {
+                if (depthMm in 1..9999) {
                     sumDepthMm += depthMm
                     validPixels++
                 }
+                i += sampleStep
             }
             depthImage.close()
-            if (validPixels == 0) 1.2f else (sumDepthMm.toFloat() / validPixels.toFloat()) / 1000f
+            if (validPixels > 0) (sumDepthMm.toFloat() / validPixels) / 1000f else 1.5f
         } catch (_: Exception) {
-            1.2f
+            1.5f
         }
-    }
-
-    companion object {
-        private const val TAG = "MainActivity"
     }
 }

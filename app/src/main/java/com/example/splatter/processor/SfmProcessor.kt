@@ -43,10 +43,10 @@ object SfmProcessor {
     private const val TAG = "SfmProcessor"
 
     /** Max keyframes used for the SfM stage. */
-    private const val MAX_SFM_FRAMES = 28
+    private const val MAX_SFM_FRAMES = 32
 
     /** Max reference frames for dense plane-sweep stereo. */
-    private const val MAX_DENSE_FRAMES = 10
+    private const val MAX_DENSE_FRAMES = 12
 
     /** Max support (comparison) views per dense sweep. */
     private const val MAX_SUPPORT_VIEWS = 5
@@ -68,7 +68,7 @@ object SfmProcessor {
 
         // ---- 1. Enumerate frames (same dataset layout as Photo Mesh) ----
         val frameFiles = enumerateFrames(datasetDir)
-        if (frameFiles.size < 8) {
+        if (frameFiles.size < 6) {
             Log.w(TAG, "Only ${frameFiles.size} usable frames — too few for photo SfM")
             return@withContext null
         }
@@ -118,7 +118,7 @@ object SfmProcessor {
                 )
             )
         }
-        if (loaded.size < 8) {
+        if (loaded.size < 6) {
             Log.w(TAG, "Only ${loaded.size} keyframes loaded — too few for photo SfM")
             return@withContext null
         }
@@ -126,10 +126,10 @@ object SfmProcessor {
 
         // ---- 4. Structure-from-Motion ----
         val reconstructor = SfmReconstructor(
-            maxFeatures = 512,
-            matchRadius = 96f,
+            maxFeatures = 1000,
+            matchRadius = 180f,
             ransacIterations = 300,
-            maxReprojErrorPx = 2.0f,
+            maxReprojErrorPx = 2.5f,
             onProgress = { step, pct ->
                 onProgress(
                     FrameProcessor.ProcessingProgress(
@@ -157,7 +157,7 @@ object SfmProcessor {
             maxDepthM = scanMode.maxDepthMeters,
             depthSteps = 64,
             maxSupportViews = MAX_SUPPORT_VIEWS,
-            maxCost = 0.40f
+            maxCost = 0.52f
         )
 
         // Reference frames: spread over the registered set
@@ -226,7 +226,7 @@ object SfmProcessor {
                 ),
                 supports
             )
-            if (pseudo.validFraction < 0.05f) {
+            if (pseudo.validFraction < 0.02f) {
                 Log.i(TAG, "Sweep for frame $refIdx produced almost no valid depth — skipping")
                 continue
             }

@@ -53,14 +53,10 @@ class Track(
  * JVM unit tests on synthetic scenes.
  */
 class SfmReconstructor(
-    // High per-frame feature counts are deliberate: detection picks corners
-    // independently per frame, and tracks need the SAME physical corner
-    // selected in 3+ frames to constrain registration. Starving detection
-    // (400-512) leaves too few 3-frame tracks to register new cameras.
-    private val maxFeatures: Int = 800,
-    private val matchRadius: Float = 96f,
+    private val maxFeatures: Int = 1000,
+    private val matchRadius: Float = 180f,
     private val ransacIterations: Int = 320,
-    private val maxReprojErrorPx: Float = 2.0f,
+    private val maxReprojErrorPx: Float = 2.5f,
     private val minTrackViews: Int = 2,
     private val onProgress: ((String, Int) -> Unit)? = null
 ) {
@@ -124,19 +120,17 @@ class SfmReconstructor(
             val ms = FeatureMatcher.match(
                 features[a], features[b],
                 radius = matchRadius * radiusScale,
-                censusMaxBits = if (strict) 1 else 2,
-                minNcc = if (strict) 0.85f else 0.75f
+                censusMaxBits = if (strict) 2 else 3,
+                minNcc = if (strict) 0.75f else 0.70f
             )
             for (m in ms) union(keyOf(a, m.i), keyOf(b, m.j))
         }
 
         for (f in 0 until frames.size - 1) link(f, f + 1, 1f, strict = false)
-        // Wider baselines merge chain-split tracks, but loose thresholds at
-        // large gaps merge WRONG features and poison the seed map — keep
-        // these links strict and short-range.
-        val maxGap = minOf(3, frames.size - 1)
+        // Wider baselines merge chain-split tracks...
+        val maxGap = minOf(4, frames.size - 1)
         for (gap in 2..maxGap) {
-            for (f in 0..frames.size - 1 - gap) link(f, f + gap, 1.5f * (gap - 1), strict = true)
+            for (f in 0..frames.size - 1 - gap) link(f, f + gap, 1.25f * gap, strict = true)
         }
 
         val trackObservations = HashMap<Long, MutableList<Track.Obs>>()
@@ -151,11 +145,6 @@ class SfmReconstructor(
         val tracks = trackObservations.entries
             .filter { it.value.size >= minTrackViews }
             .map { (_, obsList) ->
-                // One observation per frame: union-find merges can chain two
-                // features of the SAME frame into one track (a gap link hit
-                // mid-chain). The duplicates are mutually inconsistent and
-                // poison triangulation with a high mean error — observed:
-                // seed points collapsed from ~50 to 20 until deduped.
                 val byFrame = LinkedHashMap<Int, Track.Obs>()
                 for (o in obsList.sortedBy { it.frame }) {
                     if (!byFrame.containsKey(o.frame)) byFrame[o.frame] = o
@@ -163,7 +152,7 @@ class SfmReconstructor(
                 Track(byFrame.values.toMutableList())
             }
             .toMutableList()
-        if (tracks.size < 40) return null
+        if (tracks.size < 25) return null
 
         // Track index lookup by (frame, featureIndex) for pose registration
         val trackIndexByKey = HashMap<Long, Int>(tracks.size * 2)
@@ -193,9 +182,9 @@ class SfmReconstructor(
                 features[a], features[b],
                 radius = matchRadius * (b - a),
                 censusMaxBits = 2,
-                minNcc = 0.8f
+                minNcc = 0.75f
             )
-            if (matches.size < 24) continue
+            if (matches.size < 18) continue
             val pa = FloatArray(matches.size * 2)
             val pb = FloatArray(matches.size * 2)
             for ((k, m) in matches.withIndex()) {
@@ -243,14 +232,41 @@ class SfmReconstructor(
             val mats = ArrayList<FloatArray>(obs.size)
             val us = ArrayList<Float>(obs.size)
             val vs = ArrayList<Float>(obs.size)
+            val posedFrames = ArrayList<Int>()
             for (o in obs) {
                 val pose = poses[o.frame] ?: continue
                 mats.add(SfmMath.projectionMatrix(pose, frames[o.frame].fx, frames[o.frame].fy, frames[o.frame].cx, frames[o.frame].cy))
                 us.add(o.x)
                 vs.add(o.y)
+                posedFrames.add(o.frame)
             }
             if (mats.size < 2) return null
             val xyz = SfmMath.triangulate(mats, us.toFloatArray(), vs.toFloatArray()) ?: return null
+
+            var hasParallax = false
+            for (i in posedFrames.indices) {
+                val pi = poses[posedFrames[i]]!!
+                val dx1 = xyz[0] - pi[12]; val dy1 = xyz[1] - pi[13]; val dz1 = xyz[2] - pi[14]
+                val len1 = sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1)
+                if (len1 < 1e-6f) continue
+                val vx1 = dx1 / len1; val vy1 = dy1 / len1; val vz1 = dz1 / len1
+
+                for (j in i + 1 until posedFrames.size) {
+                    val pj = poses[posedFrames[j]]!!
+                    val dx2 = xyz[0] - pj[12]; val dy2 = xyz[1] - pj[13]; val dz2 = xyz[2] - pj[14]
+                    val len2 = sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2)
+                    if (len2 < 1e-6f) continue
+                    val vx2 = dx2 / len2; val vy2 = dy2 / len2; val vz2 = dz2 / len2
+
+                    val dot = vx1 * vx2 + vy1 * vy2 + vz1 * vz2
+                    if (dot < 0.9995f) {
+                        hasParallax = true
+                        break
+                    }
+                }
+                if (hasParallax) break
+            }
+            if (!hasParallax) return null
             // Mean reprojection error over the posed observations used
             var err = 0f
             var n = 0
@@ -296,9 +312,9 @@ class SfmReconstructor(
         fun registerFrameByEssential(f: Int, ref: Int): FloatArray? {
             val matches = FeatureMatcher.match(
                 features[ref], features[f],
-                radius = matchRadius, censusMaxBits = 2, minNcc = 0.75f
+                radius = matchRadius, censusMaxBits = 2, minNcc = 0.72f
             )
-            if (matches.size < 30) return null
+            if (matches.size < 18) return null
             val pa = FloatArray(matches.size * 2)
             val pb = FloatArray(matches.size * 2)
             for ((k, m) in matches.withIndex()) {
@@ -311,6 +327,7 @@ class SfmReconstructor(
                 iterations = ransacIterations
             )
             rel ?: return null
+            if (rel.inlierCount < 8) return null
 
             // Correlations between matches and known 3D points via the track
             // map — RESTRICTED to the essential-matrix inliers. The full match
@@ -325,7 +342,7 @@ class SfmReconstructor(
                 val tp = pointByTrack[tid] ?: continue
                 corr.add(C(pb[2 * k], pb[2 * k + 1], tp.xyz))
             }
-            if (corr.size < 8) return null
+            if (corr.size < 5) return null
 
             // COMPOSE with the reference pose: rel.poseB is cam_f-to-world in
             // the gauge where cam_ref sits at IDENTITY, but the global gauge
@@ -385,7 +402,7 @@ class SfmReconstructor(
                     bestS = s
                 }
             }
-            if (bestInl < 8 || bestInl < corr.size / 3) return null
+            if (bestInl < 5 || (corr.size >= 8 && bestInl < corr.size / 4)) return null
 
             val scaled = basePose.copyOf()
             scaled[12] = refPose[12] + bestS * (cComp[0] - refPose[12])
@@ -410,14 +427,14 @@ class SfmReconstructor(
                     inlierV.add(c.yf)
                 }
             }
-            if (inlierXs.size < 8) return scaled
+            if (inlierXs.size < 5) return scaled
             return solvePoseDlt(inlierU, inlierV, inlierXs, frame.fx, frame.fy, frame.cx, frame.cy) ?: scaled
         }
 
         for (f in order) {
             val pose = registeredFrames()
                 .sortedBy { abs(it - f) }
-                .take(3)
+                .take(5)
                 .firstNotNullOfOrNull { ref -> registerFrameByEssential(f, ref) }
             if (pose != null) {
                 poses[f] = pose
@@ -439,7 +456,7 @@ class SfmReconstructor(
         }
 
         val registeredCount = poses.count { it != null }
-        if (registeredCount < 2 || points.size < 20) return null
+        if (registeredCount < 2 || points.size < 12) return null
 
         // ---- 7. Alternating refinement ----
         onProgress?.invoke("Refining reconstruction...", 88)

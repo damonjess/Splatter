@@ -1,12 +1,9 @@
 package com.example.splatter.ui.screens
 
 import android.opengl.GLSurfaceView
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,7 +27,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,6 +43,8 @@ fun ScanScreen(
     statusText: String,
     scanQuality: ScanQualityState,
     onToggleRecording: () -> Unit,
+    onTakeSinglePhoto: () -> Unit,
+    onFinishScan: () -> Unit,
     onBackClicked: () -> Unit,
     glSurfaceViewProvider: () -> GLSurfaceView
 ) {
@@ -57,7 +55,7 @@ fun ScanScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Top Status Header Overlay
+        // Overlay UI
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -65,6 +63,7 @@ fun ScanScreen(
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Top Status Header
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -106,7 +105,11 @@ fun ScanScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (isRecording) "RECORDING ($frameCount frames)" else statusText,
+                            text = when {
+                                isRecording -> "RECORDING ($frameCount frames)"
+                                frameCount > 0 -> "CAPTURED $frameCount PHOTOS"
+                                else -> statusText
+                            },
                             color = Color.White,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Medium
@@ -115,7 +118,8 @@ fun ScanScreen(
                 }
             }
 
-            if (isRecording) {
+            // Live Quality Feedback Card
+            if (isRecording || frameCount > 0) {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -164,7 +168,7 @@ fun ScanScreen(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text("Frames: ${scanQuality.frameCount}", color = Color.White, fontSize = 12.sp)
+                            Text("Frames/Photos: $frameCount", color = Color.White, fontSize = 12.sp)
                             Text("Points: ${scanQuality.pointCount}", color = Color.White, fontSize = 12.sp)
                         }
 
@@ -223,7 +227,7 @@ fun ScanScreen(
                 }
             }
 
-            // Bottom Recording & Mode Controls Card
+            // Bottom Control Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.82f)),
@@ -235,8 +239,8 @@ fun ScanScreen(
                         .padding(18.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    // Mode Selector Tabs (only editable when not recording)
-                    if (!isRecording) {
+                    // Mode Selector Tabs (only editable when not recording and no frames captured)
+                    if (!isRecording && frameCount == 0) {
                         Text(
                             text = "SCAN MODE SELECTOR",
                             color = Color.White.copy(alpha = 0.5f),
@@ -268,19 +272,17 @@ fun ScanScreen(
                                         .padding(vertical = 10.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            text = when (mode) {
-                                                ScanMode.OBJECT -> "📦 Object"
-                                                ScanMode.ROOM -> "🏠 Room"
-                                                ScanMode.PHOTO -> "📷 Photo Mesh"
-                                                ScanMode.PHOTO_SFM -> "🔭 Photo SfM"
-                                            },
-                                            color = if (isSelected) Color.White else Color.White.copy(alpha = 0.6f),
-                                            fontSize = 14.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                                        )
-                                    }
+                                    Text(
+                                        text = when (mode) {
+                                            ScanMode.OBJECT -> "📦 Object"
+                                            ScanMode.ROOM -> "🏠 Room"
+                                            ScanMode.PHOTO -> "📷 Photo Mesh"
+                                            ScanMode.PHOTO_SFM -> "🔭 Photo SfM"
+                                        },
+                                        color = if (isSelected) Color.White else Color.White.copy(alpha = 0.6f),
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                    )
                                 }
                             }
                         }
@@ -321,22 +323,17 @@ fun ScanScreen(
 
                                 Spacer(modifier = Modifier.height(4.dp))
 
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        text = selectedMode.description,
-                                        color = Color.White.copy(alpha = 0.85f),
-                                        fontSize = 11.sp
-                                    )
-                                }
+                                Text(
+                                    text = selectedMode.description,
+                                    color = Color.White.copy(alpha = 0.85f),
+                                    fontSize = 11.sp
+                                )
                             }
                         }
 
                         Spacer(modifier = Modifier.height(14.dp))
                     } else {
-                        // Locked Mode Badge during recording
+                        // Locked Mode Badge
                         Row(
                             modifier = Modifier
                                 .background(Color(0xFF6200EE).copy(alpha = 0.4f), RoundedCornerShape(12.dp))
@@ -346,10 +343,10 @@ fun ScanScreen(
                         ) {
                             Text(
                                 text = when (selectedMode) {
-                                    ScanMode.OBJECT -> "📦 OBJECT MODE (4–6mm Voxel)"
-                                    ScanMode.ROOM -> "🏠 ROOM MODE (Floor/Wall Detection)"
-                                    ScanMode.PHOTO -> "📷 PHOTO MESH MODE (Textured Mesh)"
-                                    ScanMode.PHOTO_SFM -> "🔭 PHOTO SfM MODE (Photo-Only Mesh)"
+                                    ScanMode.OBJECT -> "📦 OBJECT MODE ($frameCount frames)"
+                                    ScanMode.ROOM -> "🏠 ROOM MODE ($frameCount frames)"
+                                    ScanMode.PHOTO -> "📷 PHOTO MESH MODE ($frameCount photos)"
+                                    ScanMode.PHOTO_SFM -> "🔭 PHOTO SfM MODE ($frameCount photos)"
                                 },
                                 color = Color.White,
                                 fontSize = 12.sp,
@@ -361,44 +358,70 @@ fun ScanScreen(
 
                     // Scan Guidance Prompt
                     Text(
-                        text = if (isRecording) {
-                                when (selectedMode) {
-                                    ScanMode.OBJECT -> "Move slowly around target object..."
-                                    ScanMode.ROOM -> "Slowly scan walls, floor & room layout..."
-                                    ScanMode.PHOTO -> "Orbit slowly — capture every side with overlap..."
-                                    ScanMode.PHOTO_SFM -> "Orbit slowly — 60% view overlap between frames..."
-                                }
-                            } else {
-                                when (selectedMode) {
-                                    ScanMode.OBJECT -> "Point at object (0.3–2.5m) and tap REC"
-                                    ScanMode.ROOM -> "Point around room (0.5–5.0m) and tap REC"
-                                    ScanMode.PHOTO -> "Point at subject (0.3–5m) and tap REC"
-                                    ScanMode.PHOTO_SFM -> "Point at subject (0.5–8m) and tap REC"
-                                }
-                            },
-                            color = Color.White.copy(alpha = 0.85f),
-                            fontSize = 13.sp
-                        )
+                        text = when {
+                            isRecording -> "Moving around subject... Tap STOP when done."
+                            frameCount > 0 -> "Snap more photos from different angles, then tap FINISH."
+                            selectedMode == ScanMode.PHOTO_SFM -> "Orbit subject — snap manual photos (8–30 photos with 60%+ overlap) or tap REC."
+                            selectedMode == ScanMode.PHOTO -> "Orbit subject — snap manual photos or tap REC."
+                            else -> "Point camera at subject and snap photos or tap REC."
+                        },
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
 
-                    // Record / Stop Action Button
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Shutter & Recording Control Row
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // 1. Manual Shutter Button (Polycam style)
+                        if (!isRecording) {
+                            Button(
+                                onClick = onTakeSinglePhoto,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E676)),
+                                shape = CircleShape,
+                                modifier = Modifier.size(68.dp)
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("📸", fontSize = 22.sp)
+                                }
+                            }
+                        }
+
+                        // 2. Auto REC / STOP Button
                         Button(
                             onClick = onToggleRecording,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (isRecording) Color(0xFFE53935) else Color.White
                             ),
                             shape = CircleShape,
-                            modifier = Modifier.size(72.dp)
+                            modifier = Modifier.size(68.dp)
                         ) {
                             Text(
                                 text = if (isRecording) "STOP" else "REC",
                                 color = if (isRecording) Color.White else Color.Black,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
+                                fontSize = 15.sp
                             )
+                        }
+
+                        // 3. Finish & Process Button (Visible when frames captured)
+                        if (frameCount > 0 && !isRecording) {
+                            Button(
+                                onClick = onFinishScan,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFBB86FC)),
+                                shape = CircleShape,
+                                modifier = Modifier.size(68.dp)
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("✓", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                                    Text("DONE", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                }
+                            }
                         }
                     }
                 }

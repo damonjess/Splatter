@@ -20,9 +20,9 @@ object FeatureMatcher {
     fun match(
         a: FeatureList,
         b: FeatureList,
-        radius: Float = 64f,
-        censusMaxBits: Int = 2,
-        minNcc: Float = 0.8f
+        radius: Float = 180f,
+        censusMaxBits: Int = 3,
+        minNcc: Float = 0.70f
     ): List<Match> {
         if (a.count == 0 || b.count == 0) return emptyList()
         if (a.patchSize != b.patchSize) return emptyList()
