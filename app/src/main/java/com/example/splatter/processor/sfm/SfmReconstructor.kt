@@ -507,19 +507,40 @@ class SfmReconstructor(
             pointRgb.add(sampleColor(frames, tracks[tp.track]))
         }
 
-        // Frame 0's pose defines the world scale (arbitrary but stable);
-        // rescale so the scene spans roughly 1 meter — MainActivity presents
-        // this like any other mesh.
-        val sceneScale = estimateSceneScale(pointXyz)
-        if (sceneScale > 0f) {
-            val s = 1f / sceneScale
+        // ---- 8b. Metric scale recovery ----
+        // SfM poses are in arbitrary scale (the gauge is set by seedA at
+        // identity). Recover the METRIC scale by comparing SfM camera
+        // baselines to ARCore camera baselines — the AR poses are metric and
+        // always available (SfmProcessor loads them from pose_*.txt).
+        //
+        // The previous code normalised by the median nearest-NEIGHBOUR
+        // distance among the sparse points, which measures point DENSITY,
+        // not scene extent. With many SfM points (typical real scans) this
+        // blew the scene up to tens of metres, so the plane-sweep depth
+        // search range (0.5–8 m) never covered the actual depths and the
+        // fused mesh came out as a handful of fragments.
+        val metricScale = computeMetricScale(frames, poses)
+        if (metricScale > 0f) {
             for (p in pointXyz) {
-                p[0] *= s; p[1] *= s; p[2] *= s
+                p[0] *= metricScale; p[1] *= metricScale; p[2] *= metricScale
             }
-            // Rescale pose translations by the same factor
             for (i in poses.indices) {
                 val pose = poses[i] ?: continue
-                pose[12] *= s; pose[13] *= s; pose[14] *= s
+                pose[12] *= metricScale; pose[13] *= metricScale; pose[14] *= metricScale
+            }
+        } else {
+            // Fallback: normalise by bounding-box diagonal to ~3 m so depths
+            // land inside the plane-sweep search range.
+            val extent = estimateSceneExtent(pointXyz)
+            if (extent > 0f) {
+                val s = 3f / extent
+                for (p in pointXyz) {
+                    p[0] *= s; p[1] *= s; p[2] *= s
+                }
+                for (i in poses.indices) {
+                    val pose = poses[i] ?: continue
+                    pose[12] *= s; pose[13] *= s; pose[14] *= s
+                }
             }
         }
 
@@ -785,30 +806,50 @@ class SfmReconstructor(
         return pose
     }
 
-    /** Median nearest-neighbour spacing — used for the scene gauge. */
-    private fun estimateSceneScale(points: List<FloatArray>): Float {
-        if (points.size < 8) return 0f
-        val dists = ArrayList<Float>(points.size)
-        val step = (points.size / 32).coerceAtLeast(1)
-        var i = 0
-        while (i < points.size) {
-            val p = points[i]
-            var best = Float.MAX_VALUE
-            var j = 0
-            while (j < points.size) {
-                if (j == i) { j += step; continue }
-                val q = points[j]
-                val dx = p[0] - q[0]; val dy = p[1] - q[1]; val dz = p[2] - q[2]
-                val d = dx * dx + dy * dy + dz * dz
-                if (d < best) best = d
-                j += step
+    /**
+     * Recover the metric scale by comparing SfM camera baselines to ARCore
+     * camera baselines. Both describe the same camera trajectory; the ratio
+     * of AR baseline to SfM baseline is the scale factor that brings the SfM
+     * reconstruction into metric units. Returns the median ratio, or 0 when
+     * too few AR poses are available.
+     */
+    private fun computeMetricScale(frames: List<SfmFrame>, poses: Array<FloatArray?>): Float {
+        val ratios = ArrayList<Float>()
+        for (i in frames.indices) {
+            val pi = poses[i] ?: continue
+            val arI = frames[i].arPose ?: continue
+            for (j in i + 1 until frames.size) {
+                val pj = poses[j] ?: continue
+                val arJ = frames[j].arPose ?: continue
+                val sdx = pi[12] - pj[12]; val sdy = pi[13] - pj[13]; val sdz = pi[14] - pj[14]
+                val sfmBaseline = sqrt(sdx * sdx + sdy * sdy + sdz * sdz)
+                val adx = arI[12] - arJ[12]; val ady = arI[13] - arJ[13]; val adz = arI[14] - arJ[14]
+                val arBaseline = sqrt(adx * adx + ady * ady + adz * adz)
+                if (sfmBaseline > 1e-6f && arBaseline > 1e-6f) {
+                    ratios.add(arBaseline / sfmBaseline)
+                }
             }
-            if (best < Float.MAX_VALUE) dists.add(sqrt(best))
-            i += step
         }
-        if (dists.isEmpty()) return 0f
-        dists.sort()
-        return dists[dists.size / 2]
+        if (ratios.size < 3) return 0f
+        ratios.sort()
+        return ratios[ratios.size / 2]
+    }
+
+    /** Bounding-box diagonal of the point cloud — a robust scene-extent gauge. */
+    private fun estimateSceneExtent(points: List<FloatArray>): Float {
+        if (points.size < 8) return 0f
+        var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE; var minZ = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
+        for (p in points) {
+            if (p[0] < minX) minX = p[0]
+            if (p[1] < minY) minY = p[1]
+            if (p[2] < minZ) minZ = p[2]
+            if (p[0] > maxX) maxX = p[0]
+            if (p[1] > maxY) maxY = p[1]
+            if (p[2] > maxZ) maxZ = p[2]
+        }
+        val dx = maxX - minX; val dy = maxY - minY; val dz = maxZ - minZ
+        return sqrt(dx * dx + dy * dy + dz * dz)
     }
 
     /** Sample an RGB color for a track from its observations. */

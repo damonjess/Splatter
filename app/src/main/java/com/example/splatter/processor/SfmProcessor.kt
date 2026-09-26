@@ -155,8 +155,9 @@ object SfmProcessor {
             gridHeight = 96,
             minDepthM = scanMode.minDepthMeters,
             maxDepthM = scanMode.maxDepthMeters,
-            depthSteps = 40,
-            maxSupportViews = MAX_SUPPORT_VIEWS
+            depthSteps = 64,
+            maxSupportViews = MAX_SUPPORT_VIEWS,
+            maxCost = 0.40f
         )
 
         // Reference frames: spread over the registered set
@@ -166,7 +167,14 @@ object SfmProcessor {
 
         val fuser = DepthMeshFuser(
             voxelSize = scanMode.voxelSizeMeters,
-            maxTriangles = scanMode.maxPointLimit
+            maxTriangles = scanMode.maxPointLimit,
+            // Plane-sweep depth maps are quantised to ~0.12 m steps (64 steps
+            // over 0.5–8 m). The default 0.06 tolerance rejects neighbouring
+            // cells that differ by a single depth step, shredding the mesh
+            // into fragments. 0.15 keeps genuine depth jumps out while
+            // accepting the quantisation noise.
+            depthToleranceFactor = 0.15f,
+            depthToleranceMin = 0.05f
         )
 
         // Camera positions for nearest-support lookup

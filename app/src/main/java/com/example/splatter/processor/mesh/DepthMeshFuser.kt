@@ -47,7 +47,14 @@ class DepthMeshFuser(
     private val maxTriangles: Int,
     private val maxEdgeLengthFactor: Float = 10f,
     /** Connected components with fewer triangles than this are dropped as noise. */
-    private val minComponentTriangles: Int = 15
+    private val minComponentTriangles: Int = 15,
+    /** Depth-continuity tolerance as a fraction of the average quad depth.
+     *  Quads whose depth range exceeds this are rejected as depth jumps.
+     *  Default 0.06 suits fine ARCore depth; the photo-SfM pipeline passes a
+     *  larger value to accommodate the coarser plane-sweep depth resolution. */
+    private val depthToleranceFactor: Float = 0.06f,
+    /** Minimum depth-continuity tolerance in metres (floor on the factor above). */
+    private val depthToleranceMin: Float = 0.025f
 ) {
     private val maxEdgeLength = voxelSize * maxEdgeLengthFactor
 
@@ -117,7 +124,7 @@ class DepthMeshFuser(
                 val zMin = minOf(z00, z10, z01, z11)
                 val zMax = maxOf(z00, z10, z01, z11)
                 val zAvg = (z00 + z10 + z01 + z11) * 0.25f
-                val tolerance = max(0.025f, 0.06f * zAvg)
+                val tolerance = max(depthToleranceMin, depthToleranceFactor * zAvg)
                 if (zMax - zMin > tolerance) continue
 
                 // Camera-space unprojection (x right, y down, z forward)

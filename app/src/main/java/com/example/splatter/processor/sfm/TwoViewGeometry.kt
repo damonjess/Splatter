@@ -337,8 +337,6 @@ object TwoViewGeometry {
                     R[6], R[7], R[8], t[2]
                 )
                 var front = 0
-                var nulls = 0
-                var z1neg = 0; var z2neg = 0
                 for (k in 0 until na.size / 2) {
                     if (!mask[k]) continue
                     val X = SfmMath.triangulate(
@@ -346,16 +344,13 @@ object TwoViewGeometry {
                         floatArrayOf(na[2 * k], nb[2 * k]),
                         floatArrayOf(na[2 * k + 1], nb[2 * k + 1])
                     )
-                    if (X == null) { nulls++; continue }
+                    if (X == null) continue
                     // Depth in camera 2: z of R X + t
                     val xc = SfmMath.rotate3(R, floatArrayOf(X[0], X[1], X[2]))
                     val z1 = X[2]
                     val z2 = xc[2] + t[2]
-                    if (z1 <= 0f) z1neg++
-                    if (z2 <= 0f) z2neg++
                     if (z1 > 0f && z2 > 0f) front++
                 }
-                println("DBG hyp: front=$front nulls=$nulls z1neg=$z1neg z2neg=$z2neg")
                 if (front > bestFront) {
                     bestFront = front
                     bestPose = composePose(R, t)
