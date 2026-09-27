@@ -1,11 +1,13 @@
 package com.example.splatter.processor.sfm
 
+import org.junit.Assert
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * End-to-end JVM tests for the photo-only pipeline on a synthetic textured
@@ -199,10 +201,13 @@ class SfmEndToEndTest {
         assertEquals(4, result.poses.count { it != null })
 
         // Plenty of triangulated points. (Measured yield for this 192x144
-        // scene with the census/NCC feature pipeline: ~60 consistent points
-        // — the bar sits below that; the correctness assertions below are
-        // the real check.)
-        assertTrue("points=${result.pointsXyz.size}", result.pointsXyz.size >= 50)
+        // scene with the census/NCC feature pipeline: ~35-40 consistent
+        // points after widening the matcher's rotation/NCC tolerance so it
+        // can handle real wide-baseline orbit photos (see SfmReconstructor
+        // comments) — fewer than the old tight-threshold yield, but the bar
+        // sits below that; the correctness assertions below are the real
+        // check.)
+        assertTrue("points=${result.pointsXyz.size}", result.pointsXyz.size >= 30)
 
         // The recovered camera positions should be spread by roughly the
         // true baseline (up to the arbitrary SfM scale): the distance between
@@ -210,7 +215,7 @@ class SfmEndToEndTest {
         val p0 = result.poses[0]!!
         val p1 = result.poses[1]!!
         val dx = p0[12] - p1[12]; val dy = p0[13] - p1[13]; val dz = p0[14] - p1[14]
-        val baseline = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+        val baseline = sqrt(dx * dx + dy * dy + dz * dz)
 
         // Scene extent from points — robust (10th..90th percentile of camera
         // distance), because the salvage pass can admit a few far outliers
@@ -218,7 +223,7 @@ class SfmEndToEndTest {
         val c0 = floatArrayOf(p0[12], p0[13], p0[14])
         val dists2 = result.pointsXyz.map { p ->
             val d = floatArrayOf(p[0] - c0[0], p[1] - c0[1], p[2] - c0[2])
-            kotlin.math.sqrt(SfmMath.dot3(d, d))
+            sqrt(SfmMath.dot3(d, d))
         }.sorted()
         val depthExtent = dists2[dists2.size * 9 / 10] - dists2[dists2.size / 10]
         assertTrue(
@@ -304,6 +309,6 @@ class SfmEndToEndTest {
             SfmFrame(2, IntArray(64 * 48) { 0xFF808080.toInt() }, 64, 48, 60f, 60f, 31.5f, 23.5f)
         )
         val result = SfmReconstructor().reconstruct(frames)
-        org.junit.Assert.assertNull(result)
+        Assert.assertNull(result)
     }
 }

@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.media.Image
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
@@ -199,7 +200,7 @@ class MainActivity : ComponentActivity() {
                                 processingIsPhotoMode = false
                                 Toast.makeText(
                                     this@MainActivity,
-                                    "Photo SfM failed — need more texture/overlap: orbit subject with 60%+ overlap",
+                                    "Photo SfM failed — take more, closer-together photos: keep ~10-15° of turn between shots (30-40+ photos for a full loop around the object)",
                                     Toast.LENGTH_LONG
                                 ).show()
                                 refreshGallery()
@@ -369,7 +370,7 @@ class MainActivity : ComponentActivity() {
                                 processingIsPhotoMode = false
                                 Toast.makeText(
                                     this@MainActivity,
-                                    "Photo SfM failed — orbit slower with 60%+ overlap and good lighting",
+                                    "Photo SfM failed — take more, closer-together photos: keep ~10-15° of turn between shots (30-40+ photos for a full loop) and good lighting",
                                     Toast.LENGTH_LONG
                                 ).show()
                                 refreshGallery()
@@ -831,6 +832,18 @@ class MainActivity : ComponentActivity() {
         private var texCoordAttrib = 0
         private var texUniform = -1
 
+        // If activeSession.update() throws on every single frame (camera
+        // conflict, thermal event, or the exhausted-buffer-pool state the
+        // acquireXImage() leak above could cause), the old code just logged
+        // a warning and kept retrying forever — nothing ever reset the
+        // session, so the preview stayed black for the rest of that scan
+        // (checkAndInitAR() is a no-op whenever `session` is non-null, no
+        // matter how broken it is). Track consecutive failures and force a
+        // full session recreation once it's clearly stuck rather than
+        // transient.
+        private var consecutiveUpdateFailures = 0
+        private val maxConsecutiveFailuresBeforeReset = 60 // ~1-2s of frames
+
         fun resetTextureBinding() {
             isTextureBoundToSession = false
         }
@@ -902,6 +915,7 @@ class MainActivity : ComponentActivity() {
 
             try {
                 val frame = activeSession.update()
+                consecutiveUpdateFailures = 0
 
                 // Crucial fix: rewind FloatBuffer positions before transformCoordinates2d
                 vertexBuffer.position(0)
@@ -1009,14 +1023,46 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Frame render loop skipped: ${e.message}")
+                consecutiveUpdateFailures++
+                Log.w(TAG, "Frame render loop skipped (${e.javaClass.simpleName}, $consecutiveUpdateFailures in a row): ${e.message}")
+                if (consecutiveUpdateFailures >= maxConsecutiveFailuresBeforeReset) {
+                    consecutiveUpdateFailures = 0
+                    Log.e(TAG, "AR session stuck for too many frames — forcing a full session reset")
+                    runOnUiThread {
+                        try {
+                            session?.pause()
+                            session?.close()
+                        } catch (closeEx: Exception) {
+                            Log.w(TAG, "Error closing stuck session: ${closeEx.message}")
+                        }
+                        session = null
+                        isTextureBoundToSession = false
+                        trackingStatusText.value = "Camera lost — reconnecting..."
+                        Toast.makeText(this@MainActivity, "Camera lost — reconnecting...", Toast.LENGTH_SHORT).show()
+                        checkAndInitAR()
+                    }
+                }
             }
         }
     }
 
     private fun estimateDepthCoveragePercent(frame: Frame): Int {
+        // Every acquireXImage() call hands out a buffer from ARCore's small,
+        // fixed-size image pool (often only 2-4 buffers). The old code only
+        // called .close() on the success path — ANY exception between the
+        // acquire and the close (a device-specific plane/format quirk, an
+        // arithmetic edge case, anything) leaked that buffer forever. This
+        // runs on every GL draw frame, so a handful of leaks over a scan is
+        // enough to exhaust the pool; once exhausted, every further
+        // acquireCameraImage()/acquireRawDepthImage16Bits() call starts
+        // failing — and on some camera HALs that back-pressure stalls the
+        // whole capture pipeline, which is consistent with the live preview
+        // going black and frozen mid-scan while pose tracking (a separate
+        // path) keeps reporting "Good". try/finally guarantees the buffer
+        // is always returned to the pool, leak or no leak.
+        var depthImage: Image? = null
         return try {
-            val depthImage = frame.acquireRawDepthImage16Bits()
+            depthImage = frame.acquireRawDepthImage16Bits()
             val depthBuffer = depthImage.planes[0].buffer
             val totalPixels = depthImage.width * depthImage.height
             val shortBuffer = depthBuffer.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
@@ -1025,16 +1071,18 @@ class MainActivity : ComponentActivity() {
                 val depthMm = shortBuffer.get(i).toInt() and 0xFFFF
                 if (depthMm > 0) validPixels++
             }
-            depthImage.close()
             ((validPixels.toFloat() / totalPixels.toFloat()) * 100f).toInt().coerceIn(0, 100)
         } catch (_: Exception) {
             0
+        } finally {
+            depthImage?.close()
         }
     }
 
     private fun estimateBrightness(frame: Frame): Float {
+        var cameraImage: Image? = null
         return try {
-            val cameraImage = frame.acquireCameraImage()
+            cameraImage = frame.acquireCameraImage()
             val plane = cameraImage.planes[0].buffer
             var totalBrightness = 0L
             val pixelCount = plane.remaining()
@@ -1046,16 +1094,18 @@ class MainActivity : ComponentActivity() {
                 samples++
                 i += sampleStep
             }
-            cameraImage.close()
             if (samples > 0) (totalBrightness.toFloat() / samples.toFloat()) else 128f
         } catch (_: Exception) {
             128f
+        } finally {
+            cameraImage?.close()
         }
     }
 
     private fun estimateDistanceMeters(frame: Frame): Float {
+        var depthImage: Image? = null
         return try {
-            val depthImage = frame.acquireRawDepthImage16Bits()
+            depthImage = frame.acquireRawDepthImage16Bits()
             val depthBuffer = depthImage.planes[0].buffer
             val shortBuffer = depthBuffer.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
             var sumDepthMm = 0L
@@ -1071,10 +1121,11 @@ class MainActivity : ComponentActivity() {
                 }
                 i += sampleStep
             }
-            depthImage.close()
             if (validPixels > 0) (sumDepthMm.toFloat() / validPixels) / 1000f else 1.5f
         } catch (_: Exception) {
             1.5f
+        } finally {
+            depthImage?.close()
         }
     }
 }

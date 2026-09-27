@@ -42,8 +42,15 @@ import kotlin.math.roundToInt
 object SfmProcessor {
     private const val TAG = "SfmProcessor"
 
-    /** Max keyframes used for the SfM stage. */
-    private const val MAX_SFM_FRAMES = 32
+    /**
+     * Max keyframes used for the SfM stage. Raised from 32: keyframe
+     * selection farthest-point-samples across the WHOLE orbit, so with only
+     * 32 slots a full 360-degree orbit puts >11 degrees between adjacent
+     * chosen keyframes — right where the matcher's success rate falls off a
+     * cliff. More slots (paired with the matching-tolerance changes in
+     * SfmReconstructor) keep adjacent keyframes closer together.
+     */
+    private const val MAX_SFM_FRAMES = 48
 
     /** Max reference frames for dense plane-sweep stereo. */
     private const val MAX_DENSE_FRAMES = 12

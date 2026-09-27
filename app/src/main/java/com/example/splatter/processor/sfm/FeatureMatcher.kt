@@ -10,6 +10,20 @@ object FeatureMatcher {
     /** One accepted 2-view match. */
     data class Match(val i: Int, val j: Int, val score: Float)
 
+    // Hamming-distance lookup for all 512 possible 9-bit census signature
+    // pairs. Computed ONCE at class-init instead of on every match() call —
+    // this table never changes, and match() runs dozens to hundreds of
+    // times per reconstruction (once per frame pair tried during seed
+    // search, track linking, and incremental registration), so recomputing
+    // 262,144 entries every call was pure waste that scaled with photo count.
+    private val hamming = IntArray(512 * 512).also { table ->
+        for (s1 in 0 until 512) {
+            for (s2 in 0 until 512) {
+                table[s1 * 512 + s2] = (s1 xor s2).countOneBits()
+            }
+        }
+    }
+
     /**
      * Match [a] against [b].
      *
@@ -28,14 +42,6 @@ object FeatureMatcher {
         if (a.patchSize != b.patchSize) return emptyList()
         val radius2 = radius * radius
         val patchLen = (2 * a.patchSize + 1) * (2 * a.patchSize + 1)
-
-        // Hamming-distance lookup for all 512 possible signature pairs
-        val hamming = IntArray(512 * 512)
-        for (s1 in 0 until 512) {
-            for (s2 in 0 until 512) {
-                hamming[s1 * 512 + s2] = (s1 xor s2).countOneBits()
-            }
-        }
 
         class Best(var j: Int = -1, var ncc: Float = minNcc, var dist2: Float = Float.MAX_VALUE)
 
