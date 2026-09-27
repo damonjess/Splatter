@@ -149,7 +149,7 @@ object SfmProcessor {
         )
         val sfm = reconstructor.reconstruct(sfmFrames)
         if (sfm == null) {
-            Log.w(TAG, "SfM failed — not enough trackable features or degenerate motion")
+            Log.w(TAG, "SfM failed: ${reconstructor.lastFailureReason ?: "unknown reason"}")
             return@withContext null
         }
         val poses = sfm.poses

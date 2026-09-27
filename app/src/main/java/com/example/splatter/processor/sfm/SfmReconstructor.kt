@@ -1,6 +1,7 @@
 package com.example.splatter.processor.sfm
 
 import com.example.splatter.processor.mesh.TriangleMesh
+import java.util.Random
 import kotlin.math.abs
 import kotlin.math.sqrt
 
@@ -62,11 +63,25 @@ class SfmReconstructor(
 ) {
 
     /**
+     * Set right before `reconstruct()` returns null, naming which stage and
+     * with what numbers — so a failure in the field can be diagnosed from a
+     * single logcat line instead of guessing between "not enough texture",
+     * "not enough matches", "no viable seed pair", "seed had no parallax",
+     * and "registration stalled partway through".
+     */
+    var lastFailureReason: String? = null
+        private set
+
+    /**
      * Run SfM over the keyframes. Returns null when the sequence cannot be
      * reconstructed (too few features, degenerate motion, ...).
      */
     fun reconstruct(frames: List<SfmFrame>): SfmResult? {
-        if (frames.size < 2) return null
+        lastFailureReason = null
+        if (frames.size < 2) {
+            lastFailureReason = "only ${frames.size} frame(s) passed in"
+            return null
+        }
         bestSeedRatio = 0f
         onProgress?.invoke("Detecting features...", 5)
 
@@ -78,11 +93,21 @@ class SfmReconstructor(
                 gray, f.width, f.height,
                 maxFeatures = maxFeatures,
                 qualityThreshold = 0.06f,
-                gridCells = 10
+                gridCells = 10,
+                // A real "orbit and snap photos" capture has far more
+                // rotation between shots than the few-degree inter-frame
+                // motion this pipeline was originally tuned against — the
+                // default 3px patch (7x7) barely covers a corner's own
+                // texture and NCC on it collapses once the corner rotates
+                // or foreshortens even slightly. A 6px patch (13x13) gives
+                // the correlation enough surrounding structure to survive
+                // real wide-baseline viewpoint change.
+                patchSize = 6
             )
             features.add(feat)
             if (feat.count < 24) {
                 // Not enough texture to reconstruct anything
+                lastFailureReason = "frame ${f.index} only had ${feat.count} corner features (need 24+) — subject may be too flat/matte/low-texture, or too dark/blurry"
                 return null
             }
         }
@@ -117,11 +142,16 @@ class SfmReconstructor(
         }
 
         fun link(a: Int, b: Int, radiusScale: Float, strict: Boolean) {
+            // Loosened from (2/3 bits, 0.75/0.70 NCC): those thresholds were
+            // tuned against near-zero-baseline synthetic frames and reject
+            // almost everything once real photos have more than a few
+            // degrees of rotation between them — which is normal for a
+            // hand-held orbit capture, not an edge case.
             val ms = FeatureMatcher.match(
                 features[a], features[b],
                 radius = matchRadius * radiusScale,
-                censusMaxBits = if (strict) 2 else 3,
-                minNcc = if (strict) 0.75f else 0.70f
+                censusMaxBits = if (strict) 3 else 5,
+                minNcc = if (strict) 0.62f else 0.55f
             )
             for (m in ms) union(keyOf(a, m.i), keyOf(b, m.j))
         }
@@ -152,7 +182,11 @@ class SfmReconstructor(
                 Track(byFrame.values.toMutableList())
             }
             .toMutableList()
-        if (tracks.size < 25) return null
+        if (tracks.size < 25) {
+            val counts = features.map { it.count }
+            lastFailureReason = "only ${tracks.size} feature tracks survived linking across ${frames.size} frames (need 25+; per-frame feature counts ranged ${counts.min()}-${counts.max()}, avg ${counts.average().toInt()}) — consecutive keyframes may be too far apart for the matcher, or the subject may lack repeatable texture"
+            return null
+        }
 
         // Track index lookup by (frame, featureIndex) for pose registration
         val trackIndexByKey = HashMap<Long, Int>(tracks.size * 2)
@@ -167,24 +201,32 @@ class SfmReconstructor(
         val fx0 = frames[0].fx; val fy0 = frames[0].fy
         val cx0 = frames[0].cx; val cy0 = frames[0].cy
 
+        data class SeedCandidate(val a: Int, val b: Int, val res: TwoViewGeometry.Result, val inlierCount: Int, val ratio: Float)
+        val candidates = ArrayList<SeedCandidate>()
         var bestSeed: TwoViewGeometry.Result? = null
-        var bestSeedPair = 0 to 1
+        var pairsTried = 0
+        var pairsWithEnoughMatches = 0
         val tryPairs = sequence {
-            // Consecutive frames first, then wider baselines
-            for (gap in 1..minOf(6, frames.size - 1)) {
-                for (f in 0 until frames.size - gap) {
+            // Test wider gaps (3 to 12 frames apart) for dense video captures where translation is larger
+            val startGap = if (frames.size >= 6) 3 else 1
+            val maxGap = minOf(12, frames.size - 1)
+            val step = if (frames.size >= 6) 2 else 1
+            for (gap in startGap..maxGap) {
+                for (f in 0 until frames.size - gap step step) {
                     yield(f to f + gap)
                 }
             }
-        }.take(24)
+        }.take(maxOf(48, frames.size * 3))
         for ((a, b) in tryPairs) {
+            pairsTried++
             val matches = FeatureMatcher.match(
                 features[a], features[b],
                 radius = matchRadius * (b - a),
-                censusMaxBits = 2,
-                minNcc = 0.75f
+                censusMaxBits = 5,
+                minNcc = 0.55f
             )
             if (matches.size < 18) continue
+            pairsWithEnoughMatches++
             val pa = FloatArray(matches.size * 2)
             val pb = FloatArray(matches.size * 2)
             for ((k, m) in matches.withIndex()) {
@@ -196,31 +238,35 @@ class SfmReconstructor(
                 iterations = ransacIterations
             ) ?: continue
             val ratio = res.inlierCount.toFloat() / matches.size
+            candidates.add(SeedCandidate(a, b, res, res.inlierCount, ratio))
             val better = bestSeed == null ||
                 res.inlierCount > bestSeed!!.inlierCount * 1.1f ||
                 (res.inlierCount > bestSeed!!.inlierCount * 0.9f && ratio > bestSeedRatio)
             if (better) {
                 bestSeed = res
-                bestSeedPair = a to b
                 bestSeedRatio = ratio
                 if (res.inlierCount >= 60 && ratio > 0.55f) break
             }
         }
-        val seed = bestSeed ?: return null
-        val (seedA, seedB) = bestSeedPair
-
-
-        // ---- 4. Poses: identity for seedA, recovered for seedB ----
-        val poses = arrayOfNulls<FloatArray>(frames.size)
-        poses[seedA] = SfmMath.identityPose()
-        poses[seedB] = seed.poseB
-
-        // ---- 5. Triangulate tracks visible in both seed frames ----
-        val pA = SfmMath.projectionMatrix(poses[seedA]!!, frames[seedA].fx, frames[seedA].fy, frames[seedA].cx, frames[seedA].cy)
-        val pB = SfmMath.projectionMatrix(poses[seedB]!!, frames[seedB].fx, frames[seedB].fy, frames[seedB].cx, frames[seedB].cy)
+        if (candidates.isEmpty()) {
+            lastFailureReason = "no viable 2-view seed among $pairsTried pairs tried across ${frames.size} frames " +
+                "($pairsWithEnoughMatches had 18+ matches, but none passed essential-matrix RANSAC with enough inliers)"
+            return null
+        }
+        // Try the strongest few candidates by inlier count in turn: a pair
+        // can win on inliers/ratio yet still have too little parallax to
+        // triangulate (e.g. two views taken almost back-to-back). Rather
+        // than aborting the whole reconstruction on that one pair, fall
+        // through to the next-best candidate.
+        val rankedCandidates = candidates.sortedByDescending { it.inlierCount * (0.5f + it.ratio) }.take(8)
 
         data class TrackPoint(val track: Int, var xyz: FloatArray, var error: Float)
+        val poses = arrayOfNulls<FloatArray>(frames.size)
         val points = ArrayList<TrackPoint>()
+        var seedA = -1
+        var seedB = -1
+        var bestAttemptPoints = 0
+        var bestAttemptPair = 0 to 0
 
         fun triangulateTrack(trackIndex: Int): TrackPoint? {
             val track = tracks[trackIndex]
@@ -259,7 +305,7 @@ class SfmReconstructor(
                     val vx2 = dx2 / len2; val vy2 = dy2 / len2; val vz2 = dz2 / len2
 
                     val dot = vx1 * vx2 + vy1 * vy2 + vz1 * vz2
-                    if (dot < 0.9995f) {
+                    if (dot < 0.9998f) { // ~1.14 degrees
                         hasParallax = true
                         break
                     }
@@ -279,18 +325,37 @@ class SfmReconstructor(
             return TrackPoint(trackIndex, xyz, err / n)
         }
 
-        for ((ti, track) in tracks.withIndex()) {
-            val inSeed = track.observations.any { it.frame == seedA } &&
-                track.observations.any { it.frame == seedB }
-            if (!inSeed) continue
-            val tp = triangulateTrack(ti) ?: continue
-            // 2x the nominal gate: integer-quantized corners carry ~2 px of
-            // noise which the ray geometry amplifies at depth, so the strict
-            // gate starves the seed of points.
-            if (tp.error <= maxReprojErrorPx * 2f) points.add(tp)
+        for (cand in rankedCandidates) {
+            poses.fill(null)
+            points.clear()
+            poses[cand.a] = SfmMath.identityPose()
+            poses[cand.b] = cand.res.poseB
+            for ((ti, track) in tracks.withIndex()) {
+                val inSeed = track.observations.any { it.frame == cand.a } &&
+                    track.observations.any { it.frame == cand.b }
+                if (!inSeed) continue
+                val tp = triangulateTrack(ti) ?: continue
+                // 2x the nominal gate: integer-quantized corners carry ~2 px of
+                // noise which the ray geometry amplifies at depth, so the strict
+                // gate starves the seed of points.
+                if (tp.error <= maxReprojErrorPx * 2f) points.add(tp)
+            }
+            if (points.size > bestAttemptPoints) {
+                bestAttemptPoints = points.size
+                bestAttemptPair = cand.a to cand.b
+            }
+            if (points.size >= 20) {
+                seedA = cand.a
+                seedB = cand.b
+                break
+            }
         }
 
-        if (points.size < 20) return null
+        if (seedA < 0) {
+            lastFailureReason = "tried ${rankedCandidates.size} candidate seed pairs; best was frames " +
+                "${bestAttemptPair.first},${bestAttemptPair.second} with only $bestAttemptPoints points with parallax (need 20+) — likely too little camera movement between any pair of views tried"
+            return null
+        }
 
         // ---- 6. Incremental pose estimation for remaining frames ----
         val order = buildList {
@@ -312,7 +377,7 @@ class SfmReconstructor(
         fun registerFrameByEssential(f: Int, ref: Int): FloatArray? {
             val matches = FeatureMatcher.match(
                 features[ref], features[f],
-                radius = matchRadius, censusMaxBits = 2, minNcc = 0.72f
+                radius = matchRadius, censusMaxBits = 5, minNcc = 0.55f
             )
             if (matches.size < 18) return null
             val pa = FloatArray(matches.size * 2)
@@ -456,7 +521,10 @@ class SfmReconstructor(
         }
 
         val registeredCount = poses.count { it != null }
-        if (registeredCount < 2 || points.size < 12) return null
+        if (registeredCount < 2 || points.size < 12) {
+            lastFailureReason = "after incremental registration only $registeredCount/${frames.size} frames posed and ${points.size} points triangulated (need 2+ frames, 12+ points) — most frames likely failed to match against an already-posed neighbour"
+            return null
+        }
 
         // ---- 7. Alternating refinement ----
         onProgress?.invoke("Refining reconstruction...", 88)
@@ -600,7 +668,7 @@ class SfmReconstructor(
         // Sample size must never exceed n, or the uniqueness loop below
         // spins forever (8-9 correspondence calls are legal here).
         val sampleSize = minOf(10, n)
-        val rng = java.util.Random(12345L)
+        val rng = Random(12345L)
 
         var bestPose: FloatArray? = null
         var bestInliers = 0
