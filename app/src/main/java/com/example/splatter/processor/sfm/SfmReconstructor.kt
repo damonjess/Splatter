@@ -23,8 +23,8 @@ class SfmFrame(
 class SfmResult(
     val poses: List<FloatArray?>,
     val pointsXyz: List<FloatArray>,
-    val pointsRgb: List<IntArray>,
-    val tracks: List<Track>,
+    @Suppress("unused") val pointsRgb: List<IntArray>,
+    @Suppress("unused") val tracks: List<Track>,
     val mesh: TriangleMesh
 )
 
@@ -35,6 +35,7 @@ class Track(
 ) {
     class Obs(val frame: Int, val x: Float, val y: Float, val feature: Int = -1)
 
+    @Suppress("unused")
     val observationCount: Int get() = observations.size
 }
 
@@ -219,11 +220,24 @@ class SfmReconstructor(
         val fx0 = frames[0].fx; val fy0 = frames[0].fy
         val cx0 = frames[0].cx; val cy0 = frames[0].cy
 
-        data class TrackPoint(val track: Int, var xyz: FloatArray, var error: Float)
+        data class TrackPoint(val track: Int, var xyz: FloatArray, var error: Float) {
+            override fun equals(other: Any?): Boolean {
+                if (this === other) return true
+                if (other !is TrackPoint) return false
+                if (track != other.track) return false
+                if (!xyz.contentEquals(other.xyz)) return false
+                return error == other.error
+            }
+
+            override fun hashCode(): Int {
+                var result = track
+                result = 31 * result + xyz.contentHashCode()
+                result = 31 * result + error.hashCode()
+                return result
+            }
+        }
         val poses = arrayOfNulls<FloatArray>(frames.size)
         val points = ArrayList<TrackPoint>()
-        var seedA = -1
-        var seedB = -1
 
         /**
          * Triangulate a track from the observations whose frames already have
@@ -420,8 +434,7 @@ class SfmReconstructor(
         }
 
         // Re-run the winner so poses[]/points[] hold the chosen seed.
-        seedA = winner.cand.a
-        seedB = winner.cand.b
+        val seedA = winner.cand.a
         attemptSeed(winner.cand, winner.gateScale)
 
         // ---- 6. Incremental pose estimation for remaining frames ----
@@ -466,7 +479,21 @@ class SfmReconstructor(
             // set carries ~30% outliers which bury the true scale signal.
             val pointByTrack = HashMap<Int, TrackPoint>(points.size)
             points.forEach { pointByTrack[it.track] = it }
-            data class C(val xf: Float, val yf: Float, val X: FloatArray)
+            data class C(val xf: Float, val yf: Float, val X: FloatArray) {
+                override fun equals(other: Any?): Boolean {
+                    if (this === other) return true
+                    if (other !is C) return false
+                    if (xf != other.xf || yf != other.yf) return false
+                    return X.contentEquals(other.X)
+                }
+
+                override fun hashCode(): Int {
+                    var result = xf.hashCode()
+                    result = 31 * result + yf.hashCode()
+                    result = 31 * result + X.contentHashCode()
+                    return result
+                }
+            }
             val corr = ArrayList<C>(matches.size)
             for ((k, m) in matches.withIndex()) {
                 if (!rel.inlierMask[k]) continue
@@ -600,7 +627,21 @@ class SfmReconstructor(
             // (a) Re-refine each registered pose from its 2D-3D correspondences
             for (f in registered) {
                 if (f == seedA) continue // keep the gauge fixed
-                data class C(val x: Float, val y: Float, val X: FloatArray)
+                data class C(val x: Float, val y: Float, val X: FloatArray) {
+                    override fun equals(other: Any?): Boolean {
+                        if (this === other) return true
+                        if (other !is C) return false
+                        if (x != other.x || y != other.y) return false
+                        return X.contentEquals(other.X)
+                    }
+
+                    override fun hashCode(): Int {
+                        var result = x.hashCode()
+                        result = 31 * result + y.hashCode()
+                        result = 31 * result + X.contentHashCode()
+                        return result
+                    }
+                }
                 val corr = ArrayList<C>()
                 for (tp in points) {
                     for (o in tracks[tp.track].observations) {
@@ -640,17 +681,12 @@ class SfmReconstructor(
         // (never in the seed, or rejected by a then-tighter gate) are the
         // bulk of the map at this point and cost nothing to recover.
         run {
-            var nulls = 0
-            var rejected = 0
             val usedTracks = HashSet<Int>(points.size).also { s -> points.forEach { s.add(it.track) } }
-            for ((ti, track) in tracks.withIndex()) {
+            for (ti in tracks.indices) {
                 if (ti in usedTracks) continue
-                val tp = triangulateTrack(ti)
-                if (tp == null) { nulls++; continue }
+                val tp = triangulateTrack(ti) ?: continue
                 if (tp.error <= maxReprojErrorPx * 3f) {
                     points.add(tp)
-                } else {
-                    rejected++
                 }
             }
         }
