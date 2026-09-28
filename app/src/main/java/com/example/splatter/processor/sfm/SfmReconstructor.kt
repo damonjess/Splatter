@@ -82,11 +82,11 @@ class SfmReconstructor(
             lastFailureReason = "only ${frames.size} frame(s) passed in"
             return null
         }
-        bestSeedRatio = 0f
         onProgress?.invoke("Detecting features...", 5)
 
         // ---- 1. Feature detection ----
         val features = ArrayList<FeatureList>(frames.size)
+        val lowTextureFrames = ArrayList<Int>()
         for (f in frames) {
             val gray = ImageOps.boxBlur3x3(ImageOps.toGrayscale(f.pixels), f.width, f.height)
             val feat = FeatureDetector.detect(
@@ -106,10 +106,23 @@ class SfmReconstructor(
             )
             features.add(feat)
             if (feat.count < 24) {
-                // Not enough texture to reconstruct anything
-                lastFailureReason = "frame ${f.index} only had ${feat.count} corner features (need 24+) — subject may be too flat/matte/low-texture, or too dark/blurry"
-                return null
+                // A single blurry/dark/off-target frame (e.g. the phone
+                // swung past the subject for an instant, or briefly caught
+                // a blank wall) used to abort the ENTIRE reconstruction here
+                // — throwing away every other good keyframe over one bad
+                // one. FeatureMatcher already handles low/zero-feature
+                // lists gracefully (returns no matches, doesn't crash), so
+                // a sparse frame simply fails to link with its neighbours
+                // and never gets a pose — exactly like an incremental
+                // registration failure — instead of nuking the whole run.
+                lowTextureFrames.add(f.index)
             }
+        }
+        val usableFrameCount = frames.size - lowTextureFrames.size
+        if (usableFrameCount < 2) {
+            lastFailureReason = "only $usableFrameCount/${frames.size} frame(s) had 24+ corner features " +
+                "(low-texture frames: $lowTextureFrames) — subject may be too flat/matte/low-texture overall, or too dark/blurry throughout"
+            return null
         }
 
         // ---- 2. Feature matching + track building ----
@@ -196,27 +209,158 @@ class SfmReconstructor(
             }
         }
 
-        // ---- 3. Two-view seed: try pairs, keep the most confident ----
+        // ---- 3. Two-view seed ----
+        // A candidate pair is only worth what it can TRIANGULATE: near-
+        // identical frames win on essential-matrix inliers yet carry no
+        // parallax, so inlier count must never decide which pair seeds the
+        // reconstruction. Every RANSAC survivor gets triangulated and the
+        // pair with the most usable points wins (see attemptSeed below).
         onProgress?.invoke("Estimating initial geometry...", 35)
         val fx0 = frames[0].fx; val fy0 = frames[0].fy
         val cx0 = frames[0].cx; val cy0 = frames[0].cy
 
-        data class SeedCandidate(val a: Int, val b: Int, val res: TwoViewGeometry.Result, val inlierCount: Int, val ratio: Float)
-        val candidates = ArrayList<SeedCandidate>()
-        var bestSeed: TwoViewGeometry.Result? = null
+        data class TrackPoint(val track: Int, var xyz: FloatArray, var error: Float)
+        val poses = arrayOfNulls<FloatArray>(frames.size)
+        val points = ArrayList<TrackPoint>()
+        var seedA = -1
+        var seedB = -1
+
+        /**
+         * Triangulate a track from the observations whose frames already have
+         * a pose.
+         *
+         * When [stats] is supplied, failure reasons are counted for seed
+         * diagnostics: slot 0 = degenerate triangulation, slot 1 = rejected
+         * for < ~1.8 deg ray parallax.
+         */
+        fun triangulateTrack(trackIndex: Int, stats: IntArray? = null): TrackPoint? {
+            fun fail(slot: Int): TrackPoint? {
+                stats?.let { it[slot]++ }
+                return null
+            }
+
+            val track = tracks[trackIndex]
+            val obs = track.observations
+            // Use only observations whose frame has a pose yet — tracks that
+            // ALSO span not-yet-registered frames must still triangulate from
+            // the posed subset, otherwise seed points never observe the
+            // pending frames and incremental registration deadlocks.
+            val mats = ArrayList<FloatArray>(obs.size)
+            val us = ArrayList<Float>(obs.size)
+            val vs = ArrayList<Float>(obs.size)
+            val posedFrames = ArrayList<Int>()
+            for (o in obs) {
+                val pose = poses[o.frame] ?: continue
+                mats.add(SfmMath.projectionMatrix(pose, frames[o.frame].fx, frames[o.frame].fy, frames[o.frame].cx, frames[o.frame].cy))
+                us.add(o.x)
+                vs.add(o.y)
+                posedFrames.add(o.frame)
+            }
+            if (mats.size < 2) return fail(0)
+            val xyz = SfmMath.triangulate(mats, us.toFloatArray(), vs.toFloatArray()) ?: return fail(0)
+
+            var hasParallax = false
+            for (i in posedFrames.indices) {
+                val pi = poses[posedFrames[i]]!!
+                val dx1 = xyz[0] - pi[12]; val dy1 = xyz[1] - pi[13]; val dz1 = xyz[2] - pi[14]
+                val len1 = sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1)
+                if (len1 < 1e-6f) continue
+                val vx1 = dx1 / len1; val vy1 = dy1 / len1; val vz1 = dz1 / len1
+
+                for (j in i + 1 until posedFrames.size) {
+                    val pj = poses[posedFrames[j]]!!
+                    val dx2 = xyz[0] - pj[12]; val dy2 = xyz[1] - pj[13]; val dz2 = xyz[2] - pj[14]
+                    val len2 = sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2)
+                    if (len2 < 1e-6f) continue
+                    val vx2 = dx2 / len2; val vy2 = dy2 / len2; val vz2 = dz2 / len2
+
+                    val dot = vx1 * vx2 + vy1 * vy2 + vz1 * vz2
+                    if (dot < 0.9995f) {
+                        hasParallax = true
+                        break
+                    }
+                }
+                if (hasParallax) break
+            }
+            if (!hasParallax) return fail(1)
+            // Mean reprojection error over the posed observations used
+            var err = 0f
+            var n = 0
+            for (k in mats.indices) {
+                val p = SfmMath.project(mats[k], floatArrayOf(xyz[0], xyz[1], xyz[2], 1f)) ?: return fail(0)
+                err += sqrt((p[0] - us[k]) * (p[0] - us[k]) + (p[1] - vs[k]) * (p[1] - vs[k]))
+                n++
+            }
+            if (n == 0) return fail(0)
+            return TrackPoint(trackIndex, xyz, err / n)
+        }
+
+        /** One essential-matrix candidate pair for the two-view seed. */
+        data class SeedCandidate(val a: Int, val b: Int, val res: TwoViewGeometry.Result)
+
+        /** What one seed attempt got, and why the pair's other tracks were rejected. */
+        data class SeedAttempt(
+            val cand: SeedCandidate,
+            val gateScale: Float,
+            val pointCount: Int,
+            /** Tracks with observations in BOTH seed frames. */
+            val seedTracks: Int,
+            /** Seed tracks whose least-squares triangulation was degenerate. */
+            val degenerate: Int,
+            /** Seed tracks rejected for < ~1.8 deg ray parallax. */
+            val parallaxFail: Int
+        ) {
+            val gatePx: Float = maxReprojErrorPx * gateScale
+            /** Seed tracks that triangulated fine but exceeded the reprojection gate. */
+            val errorFail: Int get() = seedTracks - degenerate - parallaxFail - pointCount
+        }
+
+        /**
+         * Install this candidate's two poses, triangulate every track spanning
+         * both frames, and count what survives the [gateScale]x reprojection
+         * gate. Fills [poses]/[points] as a side effect — the winning attempt
+         * is re-run once afterwards so those hold the chosen seed.
+         */
+        fun attemptSeed(cand: SeedCandidate, gateScale: Float): SeedAttempt {
+            poses.fill(null)
+            points.clear()
+            poses[cand.a] = SfmMath.identityPose()
+            poses[cand.b] = cand.res.poseB
+            var seedTracks = 0
+            val stats = IntArray(2)
+            for ((ti, track) in tracks.withIndex()) {
+                val inSeed = track.observations.any { it.frame == cand.a } &&
+                    track.observations.any { it.frame == cand.b }
+                if (!inSeed) continue
+                seedTracks++
+                val tp = triangulateTrack(ti, stats) ?: continue
+                if (tp.error <= maxReprojErrorPx * gateScale) points.add(tp)
+            }
+            return SeedAttempt(cand, gateScale, points.size, seedTracks, stats[0], stats[1])
+        }
+
         var pairsTried = 0
         var pairsWithEnoughMatches = 0
+        var bestAttempt: SeedAttempt? = null
+        var bestAttemptPoints = 0
+
+        // Interleaved frame-major order over gaps 1..seedMaxGap. The old
+        // gap-major order spent the entire pair budget on gap-1 pairs first,
+        // and ranking candidates by raw inlier count then tried only the top
+        // 8 — always narrow-baseline pairs with the LEAST parallax, which is
+        // exactly how the seed died with "best was frames 17,18". (An earlier
+        // flat take(24) cap had the same shape of bug for larger captures.)
+        // The budget covers every pair within seedMaxGap for up to ~53 frames
+        // (the pipeline caps keyframes at 48).
+        val seedMaxGap = minOf(6, frames.size - 1)
+        val seedPairBudget = (frames.size * seedMaxGap).coerceIn(48, 320)
         val tryPairs = sequence {
-            // Test wider gaps (3 to 12 frames apart) for dense video captures where translation is larger
-            val startGap = if (frames.size >= 6) 3 else 1
-            val maxGap = minOf(12, frames.size - 1)
-            val step = if (frames.size >= 6) 2 else 1
-            for (gap in startGap..maxGap) {
-                for (f in 0 until frames.size - gap step step) {
-                    yield(f to f + gap)
+            for (f in 0 until frames.size - 1) {
+                for (gap in 1..seedMaxGap) {
+                    if (f + gap < frames.size) yield(f to f + gap)
                 }
             }
-        }.take(maxOf(48, frames.size * 3))
+        }.take(seedPairBudget)
         for ((a, b) in tryPairs) {
             pairsTried++
             val matches = FeatureMatcher.match(
@@ -237,125 +381,48 @@ class SfmReconstructor(
                 matches, pa, pb, fx0, fy0, cx0, cy0,
                 iterations = ransacIterations
             ) ?: continue
-            val ratio = res.inlierCount.toFloat() / matches.size
-            candidates.add(SeedCandidate(a, b, res, res.inlierCount, ratio))
-            val better = bestSeed == null ||
-                res.inlierCount > bestSeed!!.inlierCount * 1.1f ||
-                (res.inlierCount > bestSeed!!.inlierCount * 0.9f && ratio > bestSeedRatio)
-            if (better) {
-                bestSeed = res
-                bestSeedRatio = ratio
-                if (res.inlierCount >= 60 && ratio > 0.55f) break
+            // 8-9 RANSAC inliers is a coin flip; a seed needs a real model.
+            if (res.inlierCount < 10) continue
+            val attempt = attemptSeed(SeedCandidate(a, b, res), 2f)
+            if (bestAttempt == null || attempt.pointCount > bestAttemptPoints) {
+                bestAttempt = attempt
+                bestAttemptPoints = attempt.pointCount
             }
+            // Confident seed — points ARE the parallax evidence, so there is
+            // no reason to keep matching pairs once plenty have survived.
+            if (bestAttemptPoints >= 50) break
         }
-        if (candidates.isEmpty()) {
+
+        val firstAttempt = bestAttempt
+        if (firstAttempt == null) {
             lastFailureReason = "no viable 2-view seed among $pairsTried pairs tried across ${frames.size} frames " +
                 "($pairsWithEnoughMatches had 18+ matches, but none passed essential-matrix RANSAC with enough inliers)"
             return null
         }
-        // Try the strongest few candidates by inlier count in turn: a pair
-        // can win on inliers/ratio yet still have too little parallax to
-        // triangulate (e.g. two views taken almost back-to-back). Rather
-        // than aborting the whole reconstruction on that one pair, fall
-        // through to the next-best candidate.
-        val rankedCandidates = candidates.sortedByDescending { it.inlierCount * (0.5f + it.ratio) }.take(8)
 
-        data class TrackPoint(val track: Int, var xyz: FloatArray, var error: Float)
-        val poses = arrayOfNulls<FloatArray>(frames.size)
-        val points = ArrayList<TrackPoint>()
-        var seedA = -1
-        var seedB = -1
-        var bestAttemptPoints = 0
-        var bestAttemptPair = 0 to 0
-
-        fun triangulateTrack(trackIndex: Int): TrackPoint? {
-            val track = tracks[trackIndex]
-            val obs = track.observations
-            // Use only observations whose frame has a pose yet — tracks that
-            // ALSO span not-yet-registered frames must still triangulate from
-            // the posed subset, otherwise seed points never observe the
-            // pending frames and incremental registration deadlocks.
-            val mats = ArrayList<FloatArray>(obs.size)
-            val us = ArrayList<Float>(obs.size)
-            val vs = ArrayList<Float>(obs.size)
-            val posedFrames = ArrayList<Int>()
-            for (o in obs) {
-                val pose = poses[o.frame] ?: continue
-                mats.add(SfmMath.projectionMatrix(pose, frames[o.frame].fx, frames[o.frame].fy, frames[o.frame].cx, frames[o.frame].cy))
-                us.add(o.x)
-                vs.add(o.y)
-                posedFrames.add(o.frame)
-            }
-            if (mats.size < 2) return null
-            val xyz = SfmMath.triangulate(mats, us.toFloatArray(), vs.toFloatArray()) ?: return null
-
-            var hasParallax = false
-            for (i in posedFrames.indices) {
-                val pi = poses[posedFrames[i]]!!
-                val dx1 = xyz[0] - pi[12]; val dy1 = xyz[1] - pi[13]; val dz1 = xyz[2] - pi[14]
-                val len1 = sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1)
-                if (len1 < 1e-6f) continue
-                val vx1 = dx1 / len1; val vy1 = dy1 / len1; val vz1 = dz1 / len1
-
-                for (j in i + 1 until posedFrames.size) {
-                    val pj = poses[posedFrames[j]]!!
-                    val dx2 = xyz[0] - pj[12]; val dy2 = xyz[1] - pj[13]; val dz2 = xyz[2] - pj[14]
-                    val len2 = sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2)
-                    if (len2 < 1e-6f) continue
-                    val vx2 = dx2 / len2; val vy2 = dy2 / len2; val vz2 = dz2 / len2
-
-                    val dot = vx1 * vx2 + vy1 * vy2 + vz1 * vz2
-                    if (dot < 0.9998f) { // ~1.14 degrees
-                        hasParallax = true
-                        break
-                    }
-                }
-                if (hasParallax) break
-            }
-            if (!hasParallax) return null
-            // Mean reprojection error over the posed observations used
-            var err = 0f
-            var n = 0
-            for (k in mats.indices) {
-                val p = SfmMath.project(mats[k], floatArrayOf(xyz[0], xyz[1], xyz[2], 1f)) ?: return null
-                err += sqrt((p[0] - us[k]) * (p[0] - us[k]) + (p[1] - vs[k]) * (p[1] - vs[k]))
-                n++
-            }
-            if (n == 0) return null
-            return TrackPoint(trackIndex, xyz, err / n)
+        // A pair can clear RANSAC yet still land just under the 20-point bar
+        // once the parallax + reprojection gates run. Give the best pair one
+        // more chance under the same 3x gate the rest of the pipeline uses.
+        var winner = firstAttempt
+        if (winner.pointCount < 20) {
+            val relaxed = attemptSeed(firstAttempt.cand, 3f)
+            if (relaxed.pointCount > winner.pointCount) winner = relaxed
         }
-
-        for (cand in rankedCandidates) {
-            poses.fill(null)
-            points.clear()
-            poses[cand.a] = SfmMath.identityPose()
-            poses[cand.b] = cand.res.poseB
-            for ((ti, track) in tracks.withIndex()) {
-                val inSeed = track.observations.any { it.frame == cand.a } &&
-                    track.observations.any { it.frame == cand.b }
-                if (!inSeed) continue
-                val tp = triangulateTrack(ti) ?: continue
-                // 2x the nominal gate: integer-quantized corners carry ~2 px of
-                // noise which the ray geometry amplifies at depth, so the strict
-                // gate starves the seed of points.
-                if (tp.error <= maxReprojErrorPx * 2f) points.add(tp)
-            }
-            if (points.size > bestAttemptPoints) {
-                bestAttemptPoints = points.size
-                bestAttemptPair = cand.a to cand.b
-            }
-            if (points.size >= 20) {
-                seedA = cand.a
-                seedB = cand.b
-                break
-            }
-        }
-
-        if (seedA < 0) {
-            lastFailureReason = "tried ${rankedCandidates.size} candidate seed pairs; best was frames " +
-                "${bestAttemptPair.first},${bestAttemptPair.second} with only $bestAttemptPoints points with parallax (need 20+) — likely too little camera movement between any pair of views tried"
+        if (winner.pointCount < 20) {
+            val c = winner.cand
+            lastFailureReason = "tried $pairsTried candidate seed pairs across ${frames.size} frames " +
+                "($pairsWithEnoughMatches had 18+ matches); best was frames ${c.a},${c.b} with " +
+                "${winner.seedTracks} tracks spanning the pair but only ${winner.pointCount} points surviving the " +
+                "${winner.gatePx}px gate (need 20+): ${winner.parallaxFail} failed the 1.8 deg parallax check, " +
+                "${winner.degenerate} triangulated degenerately, ${winner.errorFail} exceeded the error gate — " +
+                "likely too little camera movement between any pair of views tried"
             return null
         }
+
+        // Re-run the winner so poses[]/points[] hold the chosen seed.
+        seedA = winner.cand.a
+        seedB = winner.cand.b
+        attemptSeed(winner.cand, winner.gateScale)
 
         // ---- 6. Incremental pose estimation for remaining frames ----
         val order = buildList {
@@ -560,7 +627,12 @@ class SfmReconstructor(
             }
             points.clear()
             points.addAll(kept)
-            if (points.size < 20) return null
+            if (points.size < 20) {
+                lastFailureReason = "after refinement round ${round + 1} only ${points.size} points survived " +
+                    "the ${maxReprojErrorPx * 3f}px reprojection gate (need 20) — poses and points are inconsistent, " +
+                    "likely from a weak seed or bad registrations"
+                return null
+            }
         }
 
         // ---- 7b. Salvage pass: triangulate every remaining track now that
@@ -648,8 +720,6 @@ class SfmReconstructor(
         onProgress?.invoke("Photo SfM done — ${points.size} points, $registeredCount frames", 98)
         return SfmResult(poses.toList(), pointXyz, pointRgb, tracks, mesh)
     }
-
-    private var bestSeedRatio = 0f
 
     /**
      * Estimate a camera pose from 2D-3D correspondences by RANSAC over
