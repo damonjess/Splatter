@@ -35,9 +35,10 @@ A synthetic 360° sweep — 40 frames of a scene that is an analytic function of
 | GPano tags in the bytes | `ProjectionType=equirectangular`, full + cropped pixel sizes, `PoseHeadingDegrees=137.5` |
 | EXIF GPS in the bytes | 51.500729, -0.124625 |
 | App's readiness panel | all six requirements ✓, "Ready to publish to Google Maps" |
+| **Export** | "Save to Photos" → `Pictures/Splatter360/…_360.jpg`, **byte-identical** to the stitched file (md5), and present in the media library at 4096 × 2048 — i.e. the copy Google Maps' *Contribute → Add photo* picker reads. "Share 360°" opens the system share sheet with the JPEG attached. |
 | **Geometry**: panorama compared with the scene that generated it | mean colour error **0.85 / 255**, 95th percentile **2.0 / 255** |
 
-That last row is the one that matters: it is not a "the file is valid" check, it is the stitched image being measured against ground truth, so a wrong pose convention or a bad sphere mapping could not pass it.
+The geometry row is the one that matters most: it is not a "the file is valid" check, it is the stitched image being measured against ground truth, so a wrong pose convention or a bad sphere mapping could not pass it. The export row is the one that matters most for *uploading*: it proves the file reaches the place Maps can actually see it, not just that it exists in the app's own folder.
 
 ## What's new in this build — scans that actually complete
 
