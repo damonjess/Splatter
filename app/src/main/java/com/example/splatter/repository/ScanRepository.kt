@@ -7,6 +7,7 @@ import android.graphics.Matrix
 import android.util.Log
 import com.example.splatter.model.ScanMode
 import com.example.splatter.model.ScanSession
+import com.example.splatter.processor.panorama.PanoramaProcessor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -56,7 +57,8 @@ class ScanRepository(private val context: Context) {
                 pointCount = ((sizeBytes - 400).coerceAtLeast(0) / 56).toInt()
             }
 
-            val thumbFile = ensureThumbnail(dir)
+            val panoramaFile = File(dir, PanoramaProcessor.PANORAMA_FILENAME)
+            val thumbFile = if (panoramaFile.exists()) ensurePanoramaThumbnail(dir, panoramaFile) else ensureThumbnail(dir)
             val titleFile = File(dir, "title.txt")
             val title = if (titleFile.exists()) titleFile.readText().trim() else "Scan $formattedDate"
 
@@ -75,12 +77,53 @@ class ScanRepository(private val context: Context) {
                     plyFilePath = if (plyFile.exists()) plyFile.absolutePath else null,
                     splatFilePath = if (splatFile.exists()) splatFile.absolutePath else null,
                     meshFilePath = if (meshFile.exists()) meshFile.absolutePath else null,
-                    thumbnailPath = thumbFile?.absolutePath
+                    thumbnailPath = thumbFile?.absolutePath,
+                    isFavorite = File(dir, FAVORITE_MARKER).exists(),
+                    processingNote = File(dir, NOTE_FILE).takeIf { it.exists() }
+                        ?.readText()?.trim()?.takeIf { it.isNotEmpty() },
+                    panoramaFilePath = panoramaFile.takeIf { it.exists() }?.absolutePath
                 )
             )
         }
 
         sessions.sortedByDescending { it.timestamp }
+    }
+
+    /**
+     * A panorama is 2:1, so the usual portrait-crop thumbnail would show a
+     * sliver of it. This one keeps the middle third of the image instead.
+     */
+    private fun ensurePanoramaThumbnail(datasetDir: File, panoramaFile: File): File? {
+        val thumbFile = File(datasetDir, "thumbnail.jpg")
+        if (thumbFile.exists() && thumbFile.length() > 0) return thumbFile
+
+        var bitmap: Bitmap? = null
+        var cropped: Bitmap? = null
+        var scaled: Bitmap? = null
+        return try {
+            // Sample down first: the panorama is 8 MP and this is only a card thumbnail.
+            bitmap = BitmapFactory.decodeFile(
+                panoramaFile.absolutePath,
+                BitmapFactory.Options().apply { inSampleSize = 4 }
+            ) ?: return ensureThumbnail(datasetDir)
+
+            val cropWidth = (bitmap.height * 1.4f).toInt().coerceAtMost(bitmap.width)
+            val left = ((bitmap.width - cropWidth) / 2).coerceAtLeast(0)
+            cropped = Bitmap.createBitmap(bitmap, left, 0, cropWidth, bitmap.height)
+
+            val targetHeight = 480
+            val targetWidth = (targetHeight.toFloat() * cropped.width / cropped.height).toInt()
+            scaled = Bitmap.createScaledBitmap(cropped, targetWidth, targetHeight, true)
+            FileOutputStream(thumbFile).use { out -> scaled.compress(Bitmap.CompressFormat.JPEG, 85, out) }
+            thumbFile
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to build panorama thumbnail: ${e.message}")
+            ensureThumbnail(datasetDir)
+        } finally {
+            scaled?.recycle()
+            if (cropped !== scaled) cropped?.recycle()
+            bitmap?.recycle()
+        }
     }
 
     private fun ensureThumbnail(datasetDir: File): File? {
@@ -145,6 +188,35 @@ class ScanRepository(private val context: Context) {
         File(session.datasetDirPath, "title.txt").writeText(newTitle)
     }
 
+    /** Records how a scan was reconstructed, so the UI can explain it later. */
+    suspend fun setProcessingNote(session: ScanSession, note: String) = withContext(Dispatchers.IO) {
+        try {
+            File(session.datasetDirPath, NOTE_FILE).writeText(note)
+            session.processingNote = note
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not store processing note: ${e.message}")
+        }
+    }
+
+    /** Persist a scan's favourite status as a marker file inside its directory. */
+    suspend fun setFavorite(session: ScanSession, favorite: Boolean): Boolean = withContext(Dispatchers.IO) {
+        val marker = File(session.datasetDirPath, FAVORITE_MARKER)
+        val ok = try {
+            if (favorite) {
+                marker.parentFile?.mkdirs()
+                marker.writeText("1")
+            } else if (marker.exists()) {
+                marker.delete()
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating favourite: ${e.message}")
+            false
+        }
+        if (ok) session.isFavorite = favorite
+        ok
+    }
+
     suspend fun deleteScanSession(session: ScanSession): Boolean = withContext(Dispatchers.IO) {
         try {
             val dir = File(session.datasetDirPath)
@@ -159,5 +231,7 @@ class ScanRepository(private val context: Context) {
 
     companion object {
         private const val TAG = "ScanRepository"
+        const val FAVORITE_MARKER = "favorite.marker"
+        const val NOTE_FILE = "note.txt"
     }
 }

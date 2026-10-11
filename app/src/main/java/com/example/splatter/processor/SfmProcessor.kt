@@ -14,6 +14,7 @@ import com.example.splatter.processor.sfm.ImageOps
 import com.example.splatter.processor.sfm.PlaneSweepStereo
 import com.example.splatter.processor.sfm.SfmFrame
 import com.example.splatter.processor.sfm.SfmReconstructor
+import com.example.splatter.processor.sfm.SfmResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -71,6 +72,25 @@ object SfmProcessor {
         if (!datasetDir.exists() || !datasetDir.isDirectory) {
             Log.e(TAG, "Dataset directory does not exist: ${datasetDir.absolutePath}")
             return@withContext null
+        }
+
+        // ---- 0. Prefer real depth when the capture has it ----------------
+        // A device that recorded raw depth gives us metric, per-pixel geometry,
+        // which beats anything plane-sweep stereo can infer from census costs.
+        // Fusing it (through the depth pipeline, which also bakes the photos)
+        // is what turns this mode from scattered triangle shards into a solid
+        // model. The photo-only route below still runs when depth is missing
+        // or unusable — the shiny / thin / dark subjects this mode exists for.
+        if (DepthAvailability.hasUsableDepth(datasetDir)) {
+            Log.i(TAG, "Usable raw depth found — fusing depth + photos instead of plane-sweep stereo")
+            onProgress(
+                FrameProcessor.ProcessingProgress(
+                    "Raw depth found — fusing depth and photos...",
+                    6,
+                    0
+                )
+            )
+            return@withContext PhotogrammetryProcessor.process(datasetDir, scanMode, onProgress)
         }
 
         // ---- 1. Enumerate frames (same dataset layout as Photo Mesh) ----
@@ -148,13 +168,24 @@ object SfmProcessor {
             }
         )
         val sfm = reconstructor.reconstruct(sfmFrames)
-        if (sfm == null) {
-            Log.w(TAG, "SfM failed: ${reconstructor.lastFailureReason ?: "unknown reason"}")
+            ?: runRelaxedSfm(sfmFrames, onProgress)
+
+        val solved = resolvePoses(sfmFrames, sfm)
+        val poses = solved.poses
+        val registered = solved.registered
+        Log.i(TAG, "Pose source: ${solved.source} — ${registered.size}/${sfmFrames.size} frames")
+        onProgress(
+            FrameProcessor.ProcessingProgress(
+                "Solving camera motion — ${solved.source}, ${registered.size} views",
+                50,
+                0,
+                note = "Pose source: ${solved.source} (${registered.size}/${sfmFrames.size} registered)"
+            )
+        )
+        if (registered.size < 2) {
+            Log.w(TAG, "No usable camera poses for the dense stage")
             return@withContext null
         }
-        val poses = sfm.poses
-        val registered = sfmFrames.indices.filter { poses[it] != null }
-        Log.i(TAG, "SfM registered ${registered.size}/${sfmFrames.size} frames, ${sfm.pointsXyz.size} points")
 
         // ---- 5. Dense plane-sweep stereo ----
         val sweep = PlaneSweepStereo(
@@ -181,7 +212,12 @@ object SfmProcessor {
             // into fragments. 0.15 keeps genuine depth jumps out while
             // accepting the quantisation noise.
             depthToleranceFactor = 0.15f,
-            depthToleranceMin = 0.05f
+            depthToleranceMin = 0.05f,
+            // Photo-only meshes are sparse: a 128x96 sweep over a dozen views
+            // yields isolated triangles wherever the cost curve happened to dip.
+            // The depth pipeline's default of 15 triangles is far too small to
+            // tell a real patch from a stray shard, so require a real cluster.
+            minComponentTriangles = 40
         )
 
         // Camera positions for nearest-support lookup
@@ -319,10 +355,97 @@ object SfmProcessor {
             FrameProcessor.ProcessingProgress(
                 "Photo SfM mesh ready — ${mesh.triangleCount} triangles",
                 99,
-                mesh.vertexCount
+                mesh.vertexCount,
+                note = noteFor(solved, registered.size, sfmFrames.size, mesh.triangleCount)
             )
         )
         mesh
+    }
+
+    // ---- pose solving helpers ----
+
+    /**
+     * Poses for the dense stage, plus where they came from.
+     *
+     * Photo SfM is the higher-quality option but it can legitimately fail on
+     * real captures (motion blur, glossy/shiny or texture-less surfaces,
+     * repeating patterns, too little overlap). When that happens the ARCore
+     * tracking poses saved alongside every photo are used instead: they are
+     * metric, drift-free over the length of a scan, and always
+     * self-consistent, so the same dense stereo + fusion + colour-baking
+     * stages still turn the photos into a real textured model. A scan that
+     * would have dead-ended with "Photo SfM failed" now completes.
+     */
+    private class SolvedPoses(
+        val poses: List<FloatArray?>,
+        val registered: List<Int>,
+        val source: String
+    )
+
+    private fun resolvePoses(frames: List<SfmFrame>, sfm: SfmResult?): SolvedPoses {
+        if (sfm != null) {
+            val registered = frames.indices.filter { sfm.poses.getOrNull(it) != null }
+            if (registered.size >= minRegisteredFrames(frames.size)) {
+                return SolvedPoses(sfm.poses, registered, "photo SfM")
+            }
+            Log.i(TAG, "SfM only registered ${registered.size} frames — falling back to AR poses")
+        } else {
+            Log.w(TAG, "SfM failed — using ARCore tracking poses instead")
+        }
+
+        val poses = List<FloatArray?>(frames.size) { i -> frames[i].arPose }
+        val registered = frames.indices.filter { poses[it] != null }
+        return SolvedPoses(poses, registered, "AR tracking")
+    }
+
+    /**
+     * Human-readable explanation of how the geometry was obtained, stored with
+     * the scan. When SfM failed this tells the user their scan is still real
+     * geometry from AR tracking rather than leaving them guessing.
+     */
+    private fun noteFor(
+        solved: SolvedPoses,
+        registeredCount: Int,
+        totalFrames: Int,
+        triangleCount: Int
+    ): String = if (solved.source == "photo SfM") {
+        "Photo SfM reconstructed %d of %d keyframes into %,d triangles".format(
+            registeredCount, totalFrames, triangleCount
+        )
+    } else {
+        "Photo SfM couldn't solve the camera path — rebuilt from AR tracking over %d frames (%,d triangles)".format(
+            registeredCount, triangleCount
+        )
+    }
+
+    /** A partial SfM solution is only preferred when it covers most keyframes. */
+    private fun minRegisteredFrames(total: Int): Int = maxOf(2, minOf(6, total / 2))
+
+    /**
+     * Second SfM attempt with looser feature/matching parameters, run only if
+     * the default attempt failed. Doubling the retry cost (SfM runs on at most
+     * [MAX_SFM_FRAMES] keyframes) is cheap insurance against a dead-end scan.
+     */
+    private fun runRelaxedSfm(
+        frames: List<SfmFrame>,
+        onProgress: (FrameProcessor.ProcessingProgress) -> Unit
+    ): SfmResult? {
+        onProgress(FrameProcessor.ProcessingProgress("Photo SfM: retrying with looser matching...", 48, 0))
+        return SfmReconstructor(
+            maxFeatures = 1600,
+            matchRadius = 240f,
+            ransacIterations = 400,
+            maxReprojErrorPx = 3.5f,
+            onProgress = { step, pct ->
+                onProgress(
+                    FrameProcessor.ProcessingProgress(
+                        "Photo SfM (retry): $step",
+                        14 + pct * 36 / 100,
+                        0
+                    )
+                )
+            }
+        ).reconstruct(frames)
     }
 
     // ---- dataset loading helpers ----
@@ -467,10 +590,10 @@ object SfmProcessor {
         }
     }
 
+    /** Reads a pose file, converting the ARCore pose into pipeline camera space. */
     private fun parsePoseMatrix(poseFile: File): FloatArray? {
         return try {
-            val parts = poseFile.readText().trim().split(",")
-            if (parts.size == 16) FloatArray(16) { i -> parts[i].trim().toFloat() } else null
+            CameraPose.parsePoseFile(poseFile.readText())
         } catch (_: Exception) {
             null
         }

@@ -99,6 +99,7 @@ object ScanQualityEvaluator {
             ScanMode.ROOM -> 550_000
             ScanMode.PHOTO -> 400_000
             ScanMode.PHOTO_SFM -> 300_000
+            ScanMode.PANORAMA -> 1 // not a point cloud; coverage is what matters
         }
         val coverageBoost = (depthCoveragePercent / 100f) * 1.4f
         val frameBoost = (frameCount.coerceAtMost(1200) / 1200f) * 0.8f

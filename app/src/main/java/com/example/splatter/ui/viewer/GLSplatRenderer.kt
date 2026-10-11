@@ -37,6 +37,18 @@ class GLSplatRenderer : GLSurfaceView.Renderer {
 
     var pointSizeMultiplier = 1.0f
 
+    // Viewport clear colour (RGBA)
+    private var bgR = 0.04f
+    private var bgG = 0.043f
+    private var bgB = 0.058f
+
+    // "Home" framing captured from the splat bounds so Reset View frames the
+    // model instead of the AR world origin.
+    private var homeX = 0f
+    private var homeY = 0f
+    private var homeZ = 0f
+    private var homeDistance = 2.5f
+
     private var vertexBuffer: FloatBuffer? = null
     private var colorBuffer: FloatBuffer? = null
     private var scaleBuffer: FloatBuffer? = null
@@ -80,6 +92,25 @@ class GLSplatRenderer : GLSurfaceView.Renderer {
         targetY = sumY / pointCount
         targetZ = sumZ / pointCount
 
+        // Frame the camera so the whole cloud fits: distance scales with the
+        // cloud's radius about its centre of mass. Without this, a room-scale
+        // scan (metres across) would be viewed from inside the point cloud.
+        var maxRadiusSq = 0f
+        for (i in 0 until pointCount) {
+            val dx = posArray[i * 3] - targetX
+            val dy = posArray[i * 3 + 1] - targetY
+            val dz = posArray[i * 3 + 2] - targetZ
+            val rSq = dx * dx + dy * dy + dz * dz
+            if (rSq > maxRadiusSq) maxRadiusSq = rSq
+        }
+        val radius = kotlin.math.sqrt(maxRadiusSq).coerceAtLeast(0.15f)
+        cameraDistance = radius * 2.6f
+
+        homeX = targetX
+        homeY = targetY
+        homeZ = targetZ
+        homeDistance = cameraDistance
+
         vertexBuffer = ByteBuffer.allocateDirect(posArray.size * 4)
             .order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(posArray); position(0) }
 
@@ -92,8 +123,22 @@ class GLSplatRenderer : GLSurfaceView.Renderer {
         Log.i(TAG, "Uploaded $pointCount Gaussian splat points to GPU buffer.")
     }
 
+    fun setBackgroundColor(r: Float, g: Float, b: Float) {
+        bgR = r; bgG = g; bgB = b
+    }
+
+    /** Restore the framing captured from the splat bounds. */
+    fun resetView() {
+        targetX = homeX
+        targetY = homeY
+        targetZ = homeZ
+        cameraDistance = homeDistance
+        pitchDegrees = 20f
+        yawDegrees = 45f
+    }
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        GLES30.glClearColor(0.08f, 0.09f, 0.12f, 1.0f)
+        GLES30.glClearColor(bgR, bgG, bgB, 1.0f)
         GLES30.glEnable(GLES30.GL_DEPTH_TEST)
         GLES30.glEnable(GLES30.GL_BLEND)
         GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA)
@@ -158,6 +203,7 @@ class GLSplatRenderer : GLSurfaceView.Renderer {
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        GLES30.glClearColor(bgR, bgG, bgB, 1.0f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT or GLES30.GL_DEPTH_BUFFER_BIT)
 
         if (pointCount == 0 || vertexBuffer == null) return

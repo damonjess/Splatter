@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.Splatter" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- Dark, edge-to-edge, no action bar. Matches the Compose SplatterTheme
+         palette so there is no white flash on launch. -->
+    <style name="Theme.Splatter" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0A0B0F</item>
+        <item name="android:statusBarColor">#0A0B0F</item>
+        <item name="android:navigationBarColor">#0A0B0F</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
 </resources>

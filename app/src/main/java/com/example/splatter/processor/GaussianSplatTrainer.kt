@@ -550,13 +550,10 @@ object GaussianSplatTrainer {
         return Pair(depthU, depthV)
     }
 
+    /** Reads a pose file, converting the ARCore pose into pipeline camera space. */
     private fun parsePoseMatrix(poseFile: File): FloatArray? {
         return try {
-            val text = poseFile.readText().trim()
-            val parts = text.split(",")
-            if (parts.size == 16) {
-                FloatArray(16) { i -> parts[i].trim().toFloat() }
-            } else null
+            CameraPose.parsePoseFile(poseFile.readText())
         } catch (_: Exception) {
             null
         }

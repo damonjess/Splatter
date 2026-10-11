@@ -63,6 +63,25 @@ enum class ScanMode(
         detailLevelText = "Photo-only SfM + plane-sweep mesh (no depth sensor)",
         scanDurationText = "Orbit slowly, keep overlap between views",
         description = "0.5–8.0 m depth • 12 mm fusion voxel • Works where depth sensor fails (shiny/thin/dark) • PLY + OBJ export"
+    ),
+
+    /**
+     * 360° panorama: stand in one spot, sweep the phone around, and the frames are
+     * stitched into a single equirectangular JPEG (with the GPano + GPS metadata
+     * Google Maps needs). Nothing here is voxelised or meshed — the scan produces
+     * one flat 2:1 image, so the geometry fields only exist to satisfy the enum.
+     */
+    PANORAMA(
+        id = "PANORAMA",
+        displayName = "360 Photo",
+        minDepthMeters = 0.3f,
+        maxDepthMeters = 5.0f,
+        voxelSizeMeters = 0.02f,
+        maxPointLimit = 0,
+        enablePlaneDetection = false,
+        detailLevelText = "4096 × 2048 equirectangular JPEG",
+        scanDurationText = "Stand in one spot, sweep slowly all the way around",
+        description = "One spot • full sphere • stitched to an equirectangular 360 JPEG with Google Maps metadata"
     );
 
     companion object {

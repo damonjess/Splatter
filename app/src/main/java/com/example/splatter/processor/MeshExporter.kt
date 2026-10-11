@@ -9,6 +9,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import com.example.splatter.processor.mesh.GlbWriter
 import com.example.splatter.processor.mesh.MeshIo
 import com.example.splatter.processor.mesh.TriangleMesh
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +27,7 @@ object MeshExporter {
 
     const val MESH_PLY_FILENAME = "model_mesh.ply"
     const val MESH_OBJ_FILENAME = "model_mesh.obj"
+    const val MESH_GLB_FILENAME = "model_mesh.glb"
 
     suspend fun exportMeshFiles(mesh: TriangleMesh, datasetDir: File): File? =
         withContext(Dispatchers.IO) {
@@ -35,6 +37,16 @@ object MeshExporter {
 
                 val objFile = File(datasetDir, MESH_OBJ_FILENAME)
                 FileOutputStream(objFile).use { MeshIo.writeObj(mesh, it) }
+
+                // Binary glTF — the format 3D viewers, Blender and Polycam read.
+                // Vertex colours are baked in, so the exported model is textured
+                // even though the app builds meshes with vertex colours only.
+                try {
+                    val glbFile = File(datasetDir, MESH_GLB_FILENAME)
+                    glbFile.writeBytes(GlbWriter.encode(mesh))
+                } catch (e: Exception) {
+                    Log.w(TAG, "GLB export skipped: ${e.message}")
+                }
 
                 Log.i(TAG, "Exported photo mesh: ${mesh.vertexCount} verts / ${mesh.triangleCount} tris")
                 plyFile
@@ -95,8 +107,13 @@ object MeshExporter {
                 "${context.packageName}.fileprovider",
                 file
             )
+            val mime = when (file.extension.lowercase()) {
+                "glb" -> "model/gltf-binary"
+                "obj" -> "model/obj"
+                else -> "application/octet-stream"
+            }
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/octet-stream"
+                type = mime
                 putExtra(Intent.EXTRA_STREAM, uri)
                 putExtra(Intent.EXTRA_SUBJECT, "$scanTitle (${file.extension.uppercase()} 3D Mesh)")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

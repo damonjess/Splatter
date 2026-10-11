@@ -30,7 +30,10 @@ object FrameProcessor {
     data class ProcessingProgress(
         val currentStep: String,
         val progressPercent: Int,
-        val pointCount: Int
+        val pointCount: Int,
+        /** Optional one-line summary of what the pipeline actually did, kept
+         *  on the scan so the UI can explain a scan instead of guessing. */
+        val note: String? = null
     )
 
     suspend fun processDataset(
@@ -464,13 +467,14 @@ object FrameProcessor {
         return x to y
     }
 
+    /**
+     * Reads a pose file and converts the stored ARCore (OpenGL, -Z forward)
+     * pose into pipeline camera space (+Z forward, y down), which is what the
+     * unprojection below assumes. See [CameraPose].
+     */
     private fun parsePoseMatrix(poseFile: File): FloatArray? {
         return try {
-            val text = poseFile.readText().trim()
-            val parts = text.split(",")
-            if (parts.size == 16) {
-                FloatArray(16) { i -> parts[i].trim().toFloat() }
-            } else null
+            CameraPose.parsePoseFile(poseFile.readText())
         } catch (e: Exception) {
             null
         }

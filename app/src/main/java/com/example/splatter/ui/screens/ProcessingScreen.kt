@@ -27,6 +27,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.splatter.ui.theme.Amber
+import com.example.splatter.ui.theme.Fog
+import com.example.splatter.ui.theme.Ink
+import com.example.splatter.ui.theme.InkElevated
+import com.example.splatter.ui.theme.Mint
+import com.example.splatter.ui.theme.Periwinkle
+import com.example.splatter.ui.theme.Snow
 
 @Composable
 fun ProcessingScreen(
@@ -43,14 +50,14 @@ fun ProcessingScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0F1117)),
+            .background(Ink),
         contentAlignment = Alignment.Center
     ) {
         Card(
             modifier = Modifier
                 .fillMaxWidth(0.88f)
                 .padding(24.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E222D)),
+            colors = CardDefaults.cardColors(containerColor = InkElevated),
             shape = RoundedCornerShape(24.dp),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
         ) {
@@ -62,14 +69,14 @@ fun ProcessingScreen(
                 verticalArrangement = Arrangement.Center
             ) {
                 CircularProgressIndicator(
-                    color = if (isTraining) Color(0xFF03DAC6) else Color(0xFF6200EE),
+                    color = if (isTraining) Mint else Periwinkle,
                     strokeWidth = 4.dp,
                     modifier = Modifier.padding(bottom = 20.dp)
                 )
 
                 Text(
                     text = if (isTraining) "Training on Device" else titleText,
-                    color = Color.White,
+                    color = Snow,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center
@@ -79,7 +86,7 @@ fun ProcessingScreen(
 
                 Text(
                     text = currentStep,
-                    color = Color.White.copy(alpha = 0.7f),
+                    color = Fog.copy(alpha = 0.95f),
                     fontSize = 14.sp,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.height(40.dp)
@@ -92,7 +99,7 @@ fun ProcessingScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(8.dp),
-                    color = if (isTraining) Color(0xFF03DAC6) else Color(0xFFBB86FC),
+                    color = if (isTraining) Mint else Periwinkle,
                     trackColor = Color.White.copy(alpha = 0.1f)
                 )
 
@@ -100,7 +107,7 @@ fun ProcessingScreen(
 
                 Text(
                     text = "$progressPercent% Complete",
-                    color = Color.White,
+                    color = Snow,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -109,7 +116,7 @@ fun ProcessingScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "$pointCountLabel: %,d".format(pointCount),
-                        color = Color(0xFF03DAC6),
+                        color = Mint,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -137,7 +144,7 @@ fun ProcessingScreen(
                             )
                             Text(
                                 text = "$trainingIteration / $trainingTotalIterations",
-                                color = Color(0xFF03DAC6),
+                                color = Mint,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -156,7 +163,7 @@ fun ProcessingScreen(
                             )
                             Text(
                                 text = "%.4f".format(trainingLoss),
-                                color = if (trainingLoss < 0.15f) Color(0xFF4CAF50) else Color(0xFFFFC107),
+                                color = if (trainingLoss < 0.15f) Mint else Amber,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -171,7 +178,7 @@ fun ProcessingScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(4.dp),
-                                color = Color(0xFF03DAC6).copy(alpha = 0.6f),
+                                color = Mint.copy(alpha = 0.6f),
                                 trackColor = Color.White.copy(alpha = 0.08f)
                             )
                         }

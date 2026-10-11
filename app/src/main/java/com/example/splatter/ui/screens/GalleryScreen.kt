@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,25 +13,30 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,13 +51,37 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.example.splatter.model.ScanMode
 import com.example.splatter.model.ScanSession
+import com.example.splatter.processor.MeshExporter
 import com.example.splatter.processor.PlyExporter
+import com.example.splatter.ui.theme.Amber
+import com.example.splatter.ui.theme.Coral
+import com.example.splatter.ui.theme.Fog
+import com.example.splatter.ui.theme.Ink
+import com.example.splatter.ui.theme.InkContainer
+import com.example.splatter.ui.theme.InkElevated
+import com.example.splatter.ui.theme.InkHairline
+import com.example.splatter.ui.theme.Mint
+import com.example.splatter.ui.theme.Mist
+import com.example.splatter.ui.theme.OnMint
+import com.example.splatter.ui.theme.Periwinkle
+import com.example.splatter.ui.theme.Snow
+import com.example.splatter.util.PanoramaExporter
 import com.example.splatter.util.ScanArchiveExporter
+import java.io.File
+
+private enum class SortOrder(val label: String) {
+    NEWEST("Newest"),
+    OLDEST("Oldest"),
+    NAME("Name"),
+    POINTS("Points")
+}
 
 @Composable
 fun GalleryScreen(
@@ -59,116 +89,143 @@ fun GalleryScreen(
     onStartNewScan: () -> Unit,
     onOpenSession: (ScanSession) -> Unit,
     onDeleteSession: (ScanSession) -> Unit,
-    onRenameSession: (ScanSession, String) -> Unit
+    onRenameSession: (ScanSession, String) -> Unit,
+    onToggleFavorite: (ScanSession) -> Unit
 ) {
     var sessionBeingRenamed by remember { mutableStateOf<ScanSession?>(null) }
     var showAdbDialog by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    var sortOrder by remember { mutableStateOf(SortOrder.NEWEST) }
+    var favoritesOnly by remember { mutableStateOf(false) }
+
+    val visible = remember(sessions, query, sortOrder, favoritesOnly) {
+        sessions.asSequence()
+            .filter { !favoritesOnly || it.isFavorite }
+            .filter { query.isBlank() || it.title.contains(query.trim(), ignoreCase = true) }
+            .let { seq ->
+                when (sortOrder) {
+                    SortOrder.NEWEST -> seq.sortedByDescending { it.timestamp }
+                    SortOrder.OLDEST -> seq.sortedBy { it.timestamp }
+                    SortOrder.NAME -> seq.sortedBy { it.title.lowercase() }
+                    SortOrder.POINTS -> seq.sortedByDescending { it.pointCount }
+                }
+            }
+            .toList()
+    }
+
+    val totalPoints = sessions.sumOf { it.pointCount.toLong() }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0F1117))
+            .background(Ink)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(20.dp)
-        ) {
-            // Header
+        Column(modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
+            // ---- Header ----
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 28.dp, bottom = 20.dp),
+                    .padding(top = 34.dp, bottom = 14.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Splatter 3D",
-                        color = Color.White,
+                        text = "Splatter",
+                        color = Snow,
                         fontSize = 28.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "On-Device 3D Gaussian Splatting",
-                        color = Color.White.copy(alpha = 0.6f),
-                        fontSize = 13.sp
+                        text = "${sessions.size} scans · %,d points · on-device 3D".format(totalPoints),
+                        color = Fog,
+                        fontSize = 12.sp
                     )
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(
-                        onClick = { showAdbDialog = true },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF03DAC6)),
-                        shape = CircleShape,
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Text("💻 PC ADB", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    }
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = InkElevated),
+                    shape = CircleShape,
+                    onClick = { showAdbDialog = true }
+                ) {
+                    Text(
+                        "ⓘ",
+                        color = Fog,
+                        fontSize = 16.sp,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                    )
+                }
 
-                    Spacer(modifier = Modifier.width(8.dp))
+                Spacer(Modifier.width(8.dp))
 
-                    Button(
-                        onClick = onStartNewScan,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6200EE)),
-                        shape = CircleShape,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = "+ New Scan",
-                            color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                Button(
+                    onClick = onStartNewScan,
+                    colors = ButtonDefaults.buttonColors(containerColor = Mint, contentColor = OnMint),
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
+                ) {
+                    Text("+ New Scan", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
             }
 
+            // ---- Search ----
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                placeholder = { Text("Search scans", color = Fog, fontSize = 14.sp) },
+                leadingIcon = { Text("⌕", color = Fog, fontSize = 16.sp) },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                shape = RoundedCornerShape(14.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = InkElevated,
+                    unfocusedContainerColor = InkElevated,
+                    focusedTextColor = Snow,
+                    unfocusedTextColor = Snow,
+                    cursorColor = Mint,
+                    focusedIndicatorColor = Mint,
+                    unfocusedIndicatorColor = InkHairline
+                ),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(Modifier.height(10.dp))
+
+            // ---- Sort + filter chips ----
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SortOrder.entries.forEach { order ->
+                    FilterChip(order.label, sortOrder == order, Modifier.weight(1f)) { sortOrder = order }
+                }
+                FilterChip("★", favoritesOnly, Modifier.weight(0.55f)) { favoritesOnly = !favoritesOnly }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            // ---- Content ----
             if (sessions.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = "No 3D Scans Yet",
-                            color = Color.White.copy(alpha = 0.9f),
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Tap '+ New Scan' to capture RGB-D frames\nand stitch a 3D Gaussian Splat model.",
-                            color = Color.White.copy(alpha = 0.5f),
-                            fontSize = 14.sp,
-                            modifier = Modifier.padding(horizontal = 32.dp)
-                        )
-                        Spacer(modifier = Modifier.height(24.dp))
-                        Button(
-                            onClick = onStartNewScan,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6200EE)),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Start Your First Scan", color = Color.White)
-                        }
-                    }
+                EmptyState(onStartNewScan)
+            } else if (visible.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No scans match your search", color = Fog, fontSize = 14.sp)
                 }
             } else {
-                LazyColumn(
-                    contentPadding = PaddingValues(bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    contentPadding = PaddingValues(bottom = 28.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(sessions, key = { it.id }) { session ->
-                        ScanItemCard(
+                    items(visible, key = { it.id }) { session ->
+                        ScanGridCard(
                             session = session,
                             onOpen = { onOpenSession(session) },
                             onDelete = { onDeleteSession(session) },
-                            onRenameClick = { sessionBeingRenamed = session }
+                            onRenameClick = { sessionBeingRenamed = session },
+                            onToggleFavorite = { onToggleFavorite(session) }
                         )
                     }
                 }
@@ -200,300 +257,358 @@ fun GalleryScreen(
         }
 
         if (showAdbDialog) {
-            AlertDialog(
-                onDismissRequest = { showAdbDialog = false },
-                title = { Text("Transfer 3D PLY Models to PC") },
-                text = {
-                    Column {
-                        Text(
-                            text = "To open PLY files in MeshLab on PC:\n",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = "1️⃣ One-Click ADB Command on PC:\nRun in your PC terminal:\n",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = Color.Black),
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                text = "./export_to_pc.sh",
-                                color = Color(0xFF03DAC6),
-                                fontSize = 13.sp,
-                                fontFamily = FontFamily.Monospace,
-                                modifier = Modifier.padding(10.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = "This automatically extracts all .ply model files straight to your Desktop/Splatter3D_Models folder!\n\n" +
-                                   "2️⃣ On-Device:\n" +
-                                   "Tap 'Export PLY' on any scan to QuickShare/Email to PC, or tap '💾 Save PLY' to save to Downloads.",
-                            fontSize = 13.sp,
-                            color = Color.Black.copy(alpha = 0.8f)
-                        )
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = { showAdbDialog = false }) {
-                        Text("Got it")
-                    }
-                }
-            )
+            TransferDialog(onDismiss = { showAdbDialog = false })
         }
     }
 }
 
 @Composable
-fun ScanItemCard(
+private fun FilterChip(
+    label: String,
+    active: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (active) Mint else InkElevated)
+            .border(1.dp, if (active) Mint else InkHairline, RoundedCornerShape(10.dp))
+            .clickable { onClick() }
+            .padding(vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (active) OnMint else Fog,
+            fontSize = 11.sp,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+private fun EmptyState(onStartNewScan: () -> Unit) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text("◍", fontSize = 46.sp, color = Mint)
+            Spacer(Modifier.height(12.dp))
+            Text("No 3D scans yet", color = Snow, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Capture RGB-D frames and stitch them\ninto a model you can orbit in 360°.",
+                color = Fog,
+                fontSize = 13.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(Modifier.height(22.dp))
+            Button(
+                onClick = onStartNewScan,
+                colors = ButtonDefaults.buttonColors(containerColor = Mint, contentColor = OnMint),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text("Start your first scan", fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScanGridCard(
     session: ScanSession,
     onOpen: () -> Unit,
     onDelete: () -> Unit,
-    onRenameClick: () -> Unit
+    onRenameClick: () -> Unit,
+    onToggleFavorite: () -> Unit
 ) {
     val context = LocalContext.current
+    var menuOpen by remember { mutableStateOf(false) }
+    val meshFile = remember(session.id) { session.getMeshFile() }
     val plyFile = remember(session.id) { session.getMeshFile() ?: session.getPlyFile() }
-    val hasPly = plyFile != null && plyFile.exists()
+    val hasModel = plyFile != null && plyFile.exists()
+    val isMesh = meshFile != null && meshFile.exists()
+    val panoramaFile = remember(session.id) {
+        session.getPanoramaFile()?.takeIf { it.exists() }
+    }
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E222D)),
-        shape = RoundedCornerShape(16.dp)
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onOpen() },
+        colors = CardDefaults.cardColors(containerColor = InkElevated),
+        shape = RoundedCornerShape(18.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            // Header: Thumbnail, Title, Frames
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+        Column(Modifier.fillMaxWidth()) {
+            // Thumbnail
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .background(InkContainer)
             ) {
-                session.getThumbnailFile()?.let { thumbFile ->
-                    val bmp = remember(thumbFile.path) {
-                        BitmapFactory.decodeFile(thumbFile.absolutePath)?.asImageBitmap()
+                session.getThumbnailFile()?.let { thumb ->
+                    val bmp = remember(thumb.path) {
+                        BitmapFactory.decodeFile(thumb.absolutePath)?.asImageBitmap()
                     }
                     bmp?.let {
                         Image(
                             bitmap = it,
                             contentDescription = null,
-                            modifier = Modifier
-                                .size(52.dp)
-                                .clip(RoundedCornerShape(10.dp)),
+                            modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Crop
                         )
-                        Spacer(modifier = Modifier.width(12.dp))
                     }
                 }
 
-                Row(
+                // Mode badge
+                Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .clickable { onRenameClick() },
-                    verticalAlignment = Alignment.CenterVertically
+                        .align(Alignment.TopStart)
+                        .padding(8.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Ink.copy(alpha = 0.7f))
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                ) {
+                    Text(modeLabel(session.scanMode), color = Snow, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                }
+
+                // Favorite heart
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(Ink.copy(alpha = 0.65f))
+                        .clickable { onToggleFavorite() },
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = session.title,
-                        color = Color.White,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "✏️",
-                        fontSize = 12.sp,
-                        color = Color.White.copy(alpha = 0.6f)
+                        if (session.isFavorite) "★" else "☆",
+                        color = if (session.isFavorite) Amber else Snow,
+                        fontSize = 15.sp
                     )
                 }
 
-                Spacer(modifier = Modifier.width(8.dp))
-
-                Text(
-                    text = "${session.frameCount} frames",
-                    color = Color.White.copy(alpha = 0.6f),
-                    fontSize = 13.sp
-                )
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Metadata Badges Row
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF03DAC6).copy(alpha = 0.15f)),
-                    shape = RoundedCornerShape(8.dp)
+                // Overflow menu
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(6.dp)
                 ) {
-                    Text(
-                        text = when (session.scanMode) {
-                            ScanMode.PHOTO, ScanMode.PHOTO_SFM -> "%,d Vertices".format(session.pointCount)
-                            else -> "%,d Gaussians".format(session.pointCount)
-                        },
-                        color = Color(0xFF03DAC6),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(6.dp))
-
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFBB86FC).copy(alpha = 0.15f)),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text(
-                        text = when (session.scanMode) {
-                            ScanMode.OBJECT -> "📦 Object"
-                            ScanMode.ROOM -> "🏠 Room"
-                            ScanMode.PHOTO -> "📷 Photo Mesh"
-                            ScanMode.PHOTO_SFM -> "🔭 Photo SfM"
-                        },
-                        color = Color(0xFFBB86FC),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
-                }
-
-                if (hasPly) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF4CAF50).copy(alpha = 0.15f)),
-                        shape = RoundedCornerShape(8.dp)
+                    Box(
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(Ink.copy(alpha = 0.65f))
+                            .clickable { menuOpen = true },
+                        contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = "📄 PLY Ready",
-                            color = Color(0xFF81C784),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        Text("⋮", color = Snow, fontSize = 18.sp)
+                    }
+
+                    DropdownMenu(
+                        expanded = menuOpen,
+                        onDismissRequest = { menuOpen = false },
+                        containerColor = InkElevated
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Open in 360°", color = Snow) },
+                            onClick = { menuOpen = false; onOpen() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (session.isFavorite) "Remove favorite" else "Add favorite", color = Snow) },
+                            onClick = { menuOpen = false; onToggleFavorite() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Rename", color = Snow) },
+                            onClick = { menuOpen = false; onRenameClick() }
+                        )
+                        if (panoramaFile != null) {
+                            DropdownMenuItem(
+                                text = { Text("Save 360° to Photos", color = Snow) },
+                                onClick = {
+                                    menuOpen = false
+                                    val uri = PanoramaExporter.saveToPictures(context, panoramaFile, session.title)
+                                    Toast.makeText(
+                                        context,
+                                        if (uri != null) "Saved to Pictures/Splatter360" else "Could not save the 360° photo",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Share 360° photo", color = Snow) },
+                                onClick = {
+                                    menuOpen = false
+                                    PanoramaExporter.share(context, panoramaFile, session.title)
+                                }
+                            )
+                        }
+                        if (panoramaFile == null) {
+                            DropdownMenuItem(
+                                text = { Text("Save to Downloads", color = Snow) },
+                                onClick = {
+                                    menuOpen = false
+                                    val ok = if (hasModel && plyFile != null) {
+                                        PlyExporter.exportPlyToDownloads(context, plyFile, session.title)
+                                    } else false
+                                    Toast.makeText(
+                                        context,
+                                        if (ok) "Saved to Downloads/Splatter3D" else "Model file not found",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            )
+                        }
+                        if (isMesh && File(session.datasetDirPath, MeshExporter.MESH_GLB_FILENAME).exists()) {
+                            DropdownMenuItem(
+                                text = { Text("Share GLB (3D file)", color = Snow) },
+                                onClick = {
+                                    menuOpen = false
+                                    MeshExporter.shareFile(
+                                        context,
+                                        File(session.datasetDirPath, MeshExporter.MESH_GLB_FILENAME),
+                                        session.title
+                                    )
+                                }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Share ZIP", color = Snow) },
+                            onClick = {
+                                menuOpen = false
+                                shareArchive(context, session)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete", color = Coral) },
+                            onClick = { menuOpen = false; onDelete() }
                         )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Action Row 1: Primary Actions (View 3D, Export PLY for MeshLab)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
+            // Text + primary action
+            Column(Modifier.fillMaxWidth().padding(10.dp)) {
+                Text(
+                    text = session.title,
+                    color = Snow,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = when {
+                        panoramaFile != null -> "equirect 360° · %d frames".format(session.frameCount)
+                        isMesh -> "%,d verts · %d frames".format(session.pointCount, session.frameCount)
+                        else -> "%,d points · %d frames".format(session.pointCount, session.frameCount)
+                    },
+                    color = Fog,
+                    fontSize = 10.sp,
+                    maxLines = 1
+                )
+                // What the reconstruction actually did — so a scan that fell back
+                // to AR tracking or to a point cloud explains itself.
+                session.processingNote?.takeIf { it.isNotBlank() }?.let { note ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = note,
+                        color = Mist,
+                        fontSize = 9.sp,
+                        lineHeight = 11.sp,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
                 Button(
                     onClick = onOpen,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (hasPly) Color(0xFFBB86FC) else Color(0xFFFF9800)
+                        containerColor = if (hasModel) Periwinkle.copy(alpha = 0.18f) else Amber.copy(alpha = 0.18f),
+                        contentColor = if (hasModel) Periwinkle else Amber
                     ),
                     shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(38.dp)
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.fillMaxWidth().height(32.dp)
                 ) {
                     Text(
-                        if (hasPly) "View 3D" else "⚡ Process 3D",
-                        color = Color.Black,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
+                        when {
+                            panoramaFile != null -> "🌐 Open 360°"
+                            hasModel -> "View 360°"
+                            else -> "⚡ Process"
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
                     )
-                }
-
-                Button(
-                    onClick = {
-                        if (hasPly && plyFile != null) {
-                            PlyExporter.sharePlyFile(context, plyFile, session.title)
-                        } else {
-                            Toast.makeText(context, "PLY file not found for this scan", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF03DAC6)),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(38.dp)
-                ) {
-                    Text("Export PLY (MeshLab)", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Action Row 2: Secondary Actions (Save to Downloads, Export ZIP, Delete)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedButton(
-                    onClick = {
-                        if (hasPly && plyFile != null) {
-                            val success = PlyExporter.exportPlyToDownloads(context, plyFile, session.title)
-                            if (success) {
-                                Toast.makeText(
-                                    context,
-                                    "Saved PLY to Downloads/Splatter3D folder",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            } else {
-                                Toast.makeText(context, "Failed to save PLY to Downloads", Toast.LENGTH_SHORT).show()
-                            }
-                        } else {
-                            Toast.makeText(context, "PLY file not found", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF03DAC6)),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier
-                        .weight(1.2f)
-                        .height(36.dp),
-                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                ) {
-                    Text("💾 Save PLY", fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                }
-
-                OutlinedButton(
-                    onClick = {
-                        val archiveFile = ScanArchiveExporter.createArchiveForSession(context, session)
-                        val uri = FileProvider.getUriForFile(
-                            context,
-                            "${context.packageName}.fileprovider",
-                            archiveFile
-                        )
-                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                            type = "application/zip"
-                            putExtra(Intent.EXTRA_STREAM, uri)
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-                        context.startActivity(Intent.createChooser(shareIntent, "Share scan ZIP archive"))
-                    },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White.copy(alpha = 0.8f)),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier
-                        .weight(1.1f)
-                        .height(36.dp),
-                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                ) {
-                    Text("📦 ZIP", fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                }
-
-                OutlinedButton(
-                    onClick = onDelete,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFCF6679)),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier
-                        .weight(0.9f)
-                        .height(36.dp),
-                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                ) {
-                    Text("Delete", fontSize = 11.sp)
                 }
             }
         }
     }
+}
+
+private fun modeLabel(mode: ScanMode): String = when (mode) {
+    ScanMode.OBJECT -> "📦 Object"
+    ScanMode.ROOM -> "🏠 Room"
+    ScanMode.PHOTO -> "📷 Photo Mesh"
+    ScanMode.PHOTO_SFM -> "🔭 Photo SfM"
+    ScanMode.PANORAMA -> "🌐 360 Photo"
+}
+
+private fun shareArchive(context: android.content.Context, session: ScanSession) {
+    try {
+        val archiveFile = ScanArchiveExporter.createArchiveForSession(context, session)
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            archiveFile
+        )
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/zip"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(shareIntent, "Share scan ZIP archive"))
+    } catch (e: Exception) {
+        Toast.makeText(context, "Could not create archive", Toast.LENGTH_SHORT).show()
+    }
+}
+
+@Composable
+private fun TransferDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Transfer 3D models to PC") },
+        text = {
+            Column {
+                Text("One-click ADB export to your PC:", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Ink),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "./export_to_pc.sh",
+                        color = Mint,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "On-device: open a scan and tap Share/Save, or use the ⋮ menu to save to Downloads.",
+                    fontSize = 13.sp
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Got it") }
+        }
+    )
 }

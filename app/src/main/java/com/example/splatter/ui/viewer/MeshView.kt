@@ -136,13 +136,21 @@ class MeshView @JvmOverloads constructor(
 
     fun resetCamera() {
         queueEvent {
-            renderer.pitchDegrees = 20f
-            renderer.yawDegrees = 45f
-            // Re-frame the whole model, not just the orbit angles
-            renderer.targetX = 0f
-            renderer.targetY = 0f
-            renderer.targetZ = 0f
-            renderer.cameraDistance = 2.5f
+            // Re-frame the whole model using the bounds captured at upload time,
+            // not the AR world origin.
+            renderer.resetView()
+            requestRender()
+        }
+    }
+
+    /** Set the viewport clear colour. `variant`: 0 = studio dark, 1 = neutral grey, 2 = white. */
+    fun setBackground(variant: Int) {
+        queueEvent {
+            when (variant) {
+                1 -> renderer.setBackgroundColor(0.20f, 0.21f, 0.24f)
+                2 -> renderer.setBackgroundColor(0.93f, 0.94f, 0.96f)
+                else -> renderer.setBackgroundColor(0.04f, 0.043f, 0.058f)
+            }
             requestRender()
         }
     }

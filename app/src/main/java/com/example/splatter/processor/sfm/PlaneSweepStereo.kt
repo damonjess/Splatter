@@ -26,7 +26,14 @@ class PlaneSweepStereo(
     /** Cells whose mean census disagreement exceeds this are marked invalid (0..1). */
     private val maxCost: Float = 0.55f,
     /** Minimum (meanCost - bestCost) for a depth minimum to count as real texture. */
-    private val flatnessMargin: Float = 0.02f
+    private val flatnessMargin: Float = 0.02f,
+    /**
+     * How many supporting views must independently agree on a depth (cost at or
+     * below [maxCost]) for it to be accepted. One view dipping below the
+     * threshold is noise — it is how a sweep fabricates isolated triangles. Two
+     * agreeing views is the smallest evidence that a real surface is there.
+     */
+    private val minAgreeingViews: Int = 2
 ) {
 
     /** One view participating in a sweep (reference or support). */
@@ -125,6 +132,7 @@ class PlaneSweepStereo(
 
                     var cost = 0f
                     var views = 0
+                    var agree = 0
                     for ((sup, _, sc) in supportData) {
                         // world -> camera
                         val dx = X - sup.pose[12]
@@ -139,14 +147,16 @@ class PlaneSweepStereo(
                         if (su < 1 || su >= sup.width - 1 || sv < 1 || sv >= sup.height - 1) {
                             cost += 0.7f
                         } else {
-                            cost += hamming[sig * 512 + sc[sv * sup.width + su]] / 9f
+                            val viewCost = hamming[sig * 512 + sc[sv * sup.width + su]] / 9f
+                            cost += viewCost
+                            if (viewCost <= maxCost) agree++
                         }
                         views++
                     }
                     if (views == 0) break
                     val mean = cost / views
                     costSum += mean
-                    if (mean < bestCost) {
+                    if (mean < bestCost && agree >= minAgreeingViews) {
                         bestCost = mean
                         bestDepth = z
                     }

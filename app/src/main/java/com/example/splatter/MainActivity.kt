@@ -41,6 +41,8 @@ import com.example.splatter.model.SplatPoint
 import com.example.splatter.processor.FrameProcessor
 import com.example.splatter.processor.GaussianSplatTrainer
 import com.example.splatter.processor.MeshExporter
+import com.example.splatter.processor.ModelCleanup
+import com.example.splatter.processor.panorama.PanoramaProcessor
 import com.example.splatter.processor.PhotogrammetryProcessor
 import com.example.splatter.processor.SfmProcessor
 import com.example.splatter.processor.PlyExporter
@@ -48,9 +50,12 @@ import com.example.splatter.processor.RoomReconstructionProcessor
 import com.example.splatter.processor.mesh.TriangleMesh
 import com.example.splatter.repository.ScanRepository
 import com.example.splatter.ui.screens.GalleryScreen
+import com.example.splatter.ui.screens.PanoramaScreen
+import com.example.splatter.ui.theme.SplatterTheme
 import com.example.splatter.ui.screens.ProcessingScreen
 import com.example.splatter.ui.screens.ScanScreen
 import com.example.splatter.ui.screens.ViewerScreen
+import com.example.splatter.util.CaptureContext
 import com.example.splatter.util.FrameSaver
 import com.example.splatter.util.ScanQualityEvaluator
 import com.google.ar.core.ArCoreApk
@@ -75,7 +80,8 @@ enum class AppScreen {
     GALLERY,
     SCAN,
     PROCESSING,
-    VIEWER
+    VIEWER,
+    PANORAMA
 }
 
 class MainActivity : ComponentActivity() {
@@ -111,6 +117,7 @@ class MainActivity : ComponentActivity() {
         repository = ScanRepository(applicationContext)
 
         setContent {
+            SplatterTheme {
             var currentScreen by remember { mutableStateOf(AppScreen.GALLERY) }
             var scanSessions by remember { mutableStateOf<List<ScanSession>>(emptyList()) }
             var activeSession by remember { mutableStateOf<ScanSession?>(null) }
@@ -127,6 +134,12 @@ class MainActivity : ComponentActivity() {
             var trainingTotalIterations by remember { mutableIntStateOf(0) }
             var trainingLoss by remember { mutableStateOf(0f) }
             var processingIsPhotoMode by remember { mutableStateOf(false) }
+            var processingIsPanorama by remember { mutableStateOf(false) }
+
+            // One-line summary produced by the pipeline that just ran (which
+            // pose source it used, why it fell back) — stored with the scan so
+            // the gallery and viewer can explain it.
+            var processingNote by remember { mutableStateOf<String?>(null) }
 
             var hasCameraPermission by remember {
                 mutableStateOf(
@@ -135,15 +148,23 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
+            // Camera is required; location is optional and only used to write GPS
+            // tags into a 360° panorama so Google Maps can place it.
             val permissionLauncher = rememberLauncherForActivityResult(
-                contract = ActivityResultContracts.RequestPermission()
-            ) { isGranted ->
-                hasCameraPermission = isGranted
+                contract = ActivityResultContracts.RequestMultiplePermissions()
+            ) { granted ->
+                hasCameraPermission = granted[Manifest.permission.CAMERA]
+                    ?: hasCameraPermission
             }
 
             LaunchedEffect(Unit) {
                 if (!hasCameraPermission) {
-                    permissionLauncher.launch(Manifest.permission.CAMERA)
+                    permissionLauncher.launch(
+                        arrayOf(
+                            Manifest.permission.CAMERA,
+                            Manifest.permission.ACCESS_FINE_LOCATION
+                        )
+                    )
                 }
                 scanSessions = repository.getScanSessions()
             }
@@ -151,6 +172,149 @@ class MainActivity : ComponentActivity() {
             fun refreshGallery() {
                 lifecycleScope.launch {
                     scanSessions = repository.getScanSessions()
+                }
+            }
+
+            /** Mirrors a pipeline progress update into the UI, remembering any
+             *  summary the pipeline attached (e.g. which pose source it used). */
+            /** Best-effort: store the pipeline's own summary on the scan. */
+            fun persistNote(session: ScanSession, fallbackBody: String) {
+                val note = processingNote ?: fallbackBody
+                processingNote = null
+                lifecycleScope.launch { repository.setProcessingNote(session, note) }
+            }
+
+            fun applyProgress(progress: FrameProcessor.ProcessingProgress) {
+                progress.note?.let { processingNote = it }
+                runOnUiThread {
+                    processingStepText = progress.currentStep
+                    processingPercent = progress.progressPercent
+                    processingPointCount = progress.pointCount
+                }
+            }
+
+            /**
+             * Last-resort reconstruction path. Whatever went wrong upstream,
+             * the captured RGB frames and their AR poses are unprojected into
+             * a coloured point cloud, so a scan that can't produce a mesh is
+             * still viewable instead of dead-ending on an error toast.
+             */
+            fun fallBackToPointCloud(session: ScanSession, reason: String) {
+                lifecycleScope.launch(Dispatchers.Default) {
+                    val datasetDir = File(session.datasetDirPath)
+                    val points = FrameProcessor.processDataset(
+                        datasetDir = datasetDir,
+                        scanMode = session.scanMode,
+                        onProgress = { progress -> applyProgress(progress) }
+                    )
+
+                    if (points.isEmpty()) {
+                        runOnUiThread {
+                            currentScreen = AppScreen.GALLERY
+                            scanPendingName = null
+                            processingIsPhotoMode = false
+                            trainingPhase = false
+                            Toast.makeText(this@MainActivity, reason, Toast.LENGTH_LONG).show()
+                            refreshGallery()
+                        }
+                        return@launch
+                    }
+
+                    val cleaned = ModelCleanup.removeOutliers(
+                        points,
+                        neighbourRadiusMeters = session.scanMode.voxelSizeMeters * 2f
+                    )
+
+                    val plyFile = File(session.datasetDirPath, "model.ply")
+                    PlyExporter.exportToPly(cleaned, plyFile)
+                    val splatFile = File(session.datasetDirPath, "model.splat")
+                    PlyExporter.exportToSplat(cleaned, splatFile)
+
+                    makeThumbnail(datasetDir)?.let { thumbFile ->
+                        session.thumbnailPath = thumbFile.absolutePath
+                    }
+                    session.plyFilePath = plyFile.absolutePath
+                    session.splatFilePath = splatFile.absolutePath
+                    session.pointCount = cleaned.size
+                    persistNote(session, reason)
+
+                    runOnUiThread {
+                        activeSplatPoints = cleaned
+                        activeMesh = null
+                        activeSession = session
+                        currentScreen = AppScreen.VIEWER
+                        scanPendingName = session
+                        processingIsPhotoMode = false
+                        trainingPhase = false
+                        Toast.makeText(this@MainActivity, reason, Toast.LENGTH_LONG).show()
+                        refreshGallery()
+                    }
+                }
+            }
+
+            /**
+             * Stitches a 360° capture into its equirectangular JPEG and opens it.
+             *
+             * Shared by the end-of-recording path and by re-processing an older
+             * 360 capture from the gallery, so a stored sweep always comes back
+             * as a panorama instead of being funnelled into the point-cloud
+             * pipeline.
+             */
+            fun stitchPanorama(session: ScanSession) {
+                processingIsPanorama = true
+                lifecycleScope.launch(Dispatchers.Default) {
+                    val datasetDir = File(session.datasetDirPath)
+                    val heading = CaptureContext.readHeading(datasetDir)
+                    val panorama = PanoramaProcessor.process(
+                        datasetDir = datasetDir,
+                        headingDegrees = heading,
+                        onProgress = { progress -> applyProgress(progress) }
+                    )
+
+                    if (panorama == null) {
+                        runOnUiThread {
+                            currentScreen = AppScreen.GALLERY
+                            scanPendingName = null
+                            processingIsPhotoMode = false
+                            processingIsPanorama = false
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Not enough of the 360° covered — stand in one spot and sweep all the way around",
+                                Toast.LENGTH_LONG
+                            ).show()
+                            refreshGallery()
+                        }
+                        return@launch
+                    }
+
+                    makeThumbnail(datasetDir)?.let { thumbFile ->
+                        session.thumbnailPath = thumbFile.absolutePath
+                    }
+                    session.panoramaFilePath = panorama.absolutePath
+                    // A panorama only stitches cleanly from one spot: report how
+                    // far the camera actually travelled, so a walking capture
+                    // explains its own smearing instead of looking like a bug.
+                    val drift = PanoramaProcessor.captureFootprint(datasetDir)
+                    val footprint = if (drift > 1.5f) " — camera moved %.1f m".format(drift) else ""
+                    persistNote(
+                        session,
+                        "Stitched the capture into a 360° panorama (%.1f MB, %s)%s".format(
+                            panorama.length() / (1024f * 1024f),
+                            if (heading != null) "oriented" else "no compass reading",
+                            footprint
+                        )
+                    )
+
+                    runOnUiThread {
+                        activeSession = session
+                        activeMesh = null
+                        activeSplatPoints = emptyList()
+                        currentScreen = AppScreen.PANORAMA
+                        scanPendingName = session
+                        processingIsPhotoMode = false
+                        processingIsPanorama = false
+                        refreshGallery()
+                    }
                 }
             }
 
@@ -176,35 +340,26 @@ class MainActivity : ComponentActivity() {
                 currentScreen = AppScreen.PROCESSING
                 val photoMode = recordingSession.scanMode == ScanMode.PHOTO
                 val photoSfmMode = recordingSession.scanMode == ScanMode.PHOTO_SFM
+                val panoramaMode = recordingSession.scanMode == ScanMode.PANORAMA
                 processingIsPhotoMode = photoMode || photoSfmMode
+                processingNote = null
 
-                if (photoSfmMode) {
+                if (panoramaMode) {
+                    stitchPanorama(recordingSession)
+                } else if (photoSfmMode) {
                     lifecycleScope.launch(Dispatchers.Default) {
                         val datasetDir = File(recordingSession.datasetDirPath)
                         val mesh = SfmProcessor.process(
                             datasetDir = datasetDir,
                             scanMode = recordingSession.scanMode,
-                            onProgress = { progress ->
-                                runOnUiThread {
-                                    processingStepText = progress.currentStep
-                                    processingPercent = progress.progressPercent
-                                    processingPointCount = progress.pointCount
-                                }
-                            }
+                            onProgress = { progress -> applyProgress(progress) }
                         )
 
                         if (mesh == null) {
-                            runOnUiThread {
-                                currentScreen = AppScreen.GALLERY
-                                scanPendingName = null
-                                processingIsPhotoMode = false
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Photo SfM failed — take more, closer-together photos: keep ~10-15° of turn between shots (30-40+ photos for a full loop around the object)",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                                refreshGallery()
-                            }
+                            fallBackToPointCloud(
+                                recordingSession,
+                                "Photo geometry couldn't be solved — showing the raw point cloud instead"
+                            )
                             return@launch
                         }
 
@@ -215,6 +370,10 @@ class MainActivity : ComponentActivity() {
 
                         recordingSession.meshFilePath = meshPlyFile?.absolutePath
                         recordingSession.pointCount = mesh.vertexCount
+                        persistNote(
+                            recordingSession,
+                            "Mesh built from ${recordingSession.frameCount} captured frames"
+                        )
 
                         runOnUiThread {
                             activeMesh = mesh
@@ -231,23 +390,14 @@ class MainActivity : ComponentActivity() {
                         val mesh = PhotogrammetryProcessor.process(
                             datasetDir = datasetDir,
                             scanMode = recordingSession.scanMode,
-                            onProgress = { progress ->
-                                runOnUiThread {
-                                    processingStepText = progress.currentStep
-                                    processingPercent = progress.progressPercent
-                                    processingPointCount = progress.pointCount
-                                }
-                            }
+                            onProgress = { progress -> applyProgress(progress) }
                         )
 
                         if (mesh == null) {
-                            runOnUiThread {
-                                currentScreen = AppScreen.GALLERY
-                                scanPendingName = null
-                                processingIsPhotoMode = false
-                                Toast.makeText(this@MainActivity, "Photo mesh failed — not enough depth data captured", Toast.LENGTH_LONG).show()
-                                refreshGallery()
-                            }
+                            fallBackToPointCloud(
+                                recordingSession,
+                                "Not enough usable depth — showing the raw point cloud instead"
+                            )
                             return@launch
                         }
 
@@ -258,6 +408,10 @@ class MainActivity : ComponentActivity() {
 
                         recordingSession.meshFilePath = meshPlyFile?.absolutePath
                         recordingSession.pointCount = mesh.vertexCount
+                        persistNote(
+                            recordingSession,
+                            "Mesh built from ${recordingSession.frameCount} captured frames"
+                        )
 
                         runOnUiThread {
                             activeMesh = mesh
@@ -273,13 +427,7 @@ class MainActivity : ComponentActivity() {
                         val points = FrameProcessor.processDataset(
                             datasetDir = File(recordingSession.datasetDirPath),
                             scanMode = recordingSession.scanMode,
-                            onProgress = { progress ->
-                                runOnUiThread {
-                                    processingStepText = progress.currentStep
-                                    processingPercent = progress.progressPercent
-                                    processingPointCount = progress.pointCount
-                                }
-                            }
+                            onProgress = { progress -> applyProgress(progress) }
                         )
 
                         runOnUiThread { trainingPhase = true }
@@ -306,13 +454,20 @@ class MainActivity : ComponentActivity() {
                             runOnUiThread { trainingPhase = false }
                         }
 
+                        // Kill floating speckle (depth noise, specular highlights)
+                        // before export so the model reads as one clean object.
+                        val cleanedPoints = ModelCleanup.removeOutliers(
+                            trainedPoints,
+                            neighbourRadiusMeters = recordingSession.scanMode.voxelSizeMeters * 2f
+                        )
+
                         val plyFile = File(recordingSession.datasetDirPath, "model.ply")
-                        PlyExporter.exportToPly(trainedPoints, plyFile)
+                        PlyExporter.exportToPly(cleanedPoints, plyFile)
 
                         val splatFile = File(recordingSession.datasetDirPath, "model.splat")
-                        PlyExporter.exportToSplat(trainedPoints, splatFile)
+                        PlyExporter.exportToSplat(cleanedPoints, splatFile)
 
-                        val reconstructedPlanes = RoomReconstructionProcessor.extractPlanes(trainedPoints)
+                        val reconstructedPlanes = RoomReconstructionProcessor.extractPlanes(cleanedPoints)
                         val planeObj = File(recordingSession.datasetDirPath, "room_planes.obj")
                         planeObj.writeText(RoomReconstructionProcessor.exportPlanesAsObj(reconstructedPlanes))
 
@@ -323,10 +478,14 @@ class MainActivity : ComponentActivity() {
 
                         recordingSession.plyFilePath = plyFile.absolutePath
                         recordingSession.splatFilePath = splatFile.absolutePath
-                        recordingSession.pointCount = trainedPoints.size
+                        recordingSession.pointCount = cleanedPoints.size
+                        persistNote(
+                            recordingSession,
+                            "Splat scene built from ${recordingSession.frameCount} frames into ${cleanedPoints.size} points"
+                        )
 
                         runOnUiThread {
-                            activeSplatPoints = trainedPoints
+                            activeSplatPoints = cleanedPoints
                             activeMesh = null
                             activeSession = recordingSession
                             currentScreen = AppScreen.VIEWER
@@ -349,32 +508,26 @@ class MainActivity : ComponentActivity() {
                 val photoMode = session.scanMode == ScanMode.PHOTO
                 val photoSfmMode = session.scanMode == ScanMode.PHOTO_SFM
                 processingIsPhotoMode = photoMode || photoSfmMode
+                processingNote = null
 
-                if (photoSfmMode) {
+                // A stored 360 sweep re-stitches into a panorama; it has no
+                // geometry to reconstruct, so it must not reach the point-cloud
+                // path below.
+                if (session.scanMode == ScanMode.PANORAMA) {
+                    stitchPanorama(session)
+                } else if (photoSfmMode) {
                     lifecycleScope.launch(Dispatchers.Default) {
                         val mesh = SfmProcessor.process(
                             datasetDir = datasetDir,
                             scanMode = session.scanMode,
-                            onProgress = { progress ->
-                                runOnUiThread {
-                                    processingStepText = progress.currentStep
-                                    processingPercent = progress.progressPercent
-                                    processingPointCount = progress.pointCount
-                                }
-                            }
+                            onProgress = { progress -> applyProgress(progress) }
                         )
 
                         if (mesh == null) {
-                            runOnUiThread {
-                                currentScreen = AppScreen.GALLERY
-                                processingIsPhotoMode = false
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Photo SfM failed — take more, closer-together photos: keep ~10-15° of turn between shots (30-40+ photos for a full loop) and good lighting",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                                refreshGallery()
-                            }
+                            fallBackToPointCloud(
+                                session,
+                                "Photo geometry couldn't be solved — showing the raw point cloud instead"
+                            )
                             return@launch
                         }
 
@@ -384,6 +537,7 @@ class MainActivity : ComponentActivity() {
                         }
                         session.meshFilePath = meshPlyFile?.absolutePath
                         session.pointCount = mesh.vertexCount
+                        persistNote(session, "Mesh built from ${session.frameCount} captured frames")
 
                         runOnUiThread {
                             activeMesh = mesh
@@ -399,22 +553,14 @@ class MainActivity : ComponentActivity() {
                         val mesh = PhotogrammetryProcessor.process(
                             datasetDir = datasetDir,
                             scanMode = session.scanMode,
-                            onProgress = { progress ->
-                                runOnUiThread {
-                                    processingStepText = progress.currentStep
-                                    processingPercent = progress.progressPercent
-                                    processingPointCount = progress.pointCount
-                                }
-                            }
+                            onProgress = { progress -> applyProgress(progress) }
                         )
 
                         if (mesh == null) {
-                            runOnUiThread {
-                                currentScreen = AppScreen.GALLERY
-                                processingIsPhotoMode = false
-                                Toast.makeText(this@MainActivity, "Photo mesh failed — not enough depth data captured", Toast.LENGTH_LONG).show()
-                                refreshGallery()
-                            }
+                            fallBackToPointCloud(
+                                session,
+                                "Not enough usable depth — showing the raw point cloud instead"
+                            )
                             return@launch
                         }
 
@@ -424,6 +570,7 @@ class MainActivity : ComponentActivity() {
                         }
                         session.meshFilePath = meshPlyFile?.absolutePath
                         session.pointCount = mesh.vertexCount
+                        persistNote(session, "Mesh built from ${session.frameCount} captured frames")
 
                         runOnUiThread {
                             activeMesh = mesh
@@ -439,13 +586,7 @@ class MainActivity : ComponentActivity() {
                         val points = FrameProcessor.processDataset(
                             datasetDir = datasetDir,
                             scanMode = session.scanMode,
-                            onProgress = { progress ->
-                                runOnUiThread {
-                                    processingStepText = progress.currentStep
-                                    processingPercent = progress.progressPercent
-                                    processingPointCount = progress.pointCount
-                                }
-                            }
+                            onProgress = { progress -> applyProgress(progress) }
                         )
 
                         runOnUiThread { trainingPhase = true }
@@ -472,21 +613,30 @@ class MainActivity : ComponentActivity() {
                             runOnUiThread { trainingPhase = false }
                         }
 
+                        val cleanedPoints = ModelCleanup.removeOutliers(
+                            trainedPoints,
+                            neighbourRadiusMeters = session.scanMode.voxelSizeMeters * 2f
+                        )
+
                         val plyFile = File(session.datasetDirPath, "model.ply")
-                        PlyExporter.exportToPly(trainedPoints, plyFile)
+                        PlyExporter.exportToPly(cleanedPoints, plyFile)
 
                         val splatFile = File(session.datasetDirPath, "model.splat")
-                        PlyExporter.exportToSplat(trainedPoints, splatFile)
+                        PlyExporter.exportToSplat(cleanedPoints, splatFile)
 
                         makeThumbnail(datasetDir)?.let { thumbFile ->
                             session.thumbnailPath = thumbFile.absolutePath
                         }
                         session.plyFilePath = plyFile.absolutePath
                         session.splatFilePath = splatFile.absolutePath
-                        session.pointCount = trainedPoints.size
+                        session.pointCount = cleanedPoints.size
+                        persistNote(
+                            session,
+                            "Splat scene built from ${session.frameCount} frames into ${cleanedPoints.size} points"
+                        )
 
                         runOnUiThread {
-                            activeSplatPoints = trainedPoints
+                            activeSplatPoints = cleanedPoints
                             activeMesh = null
                             activeSession = session
                             currentScreen = AppScreen.VIEWER
@@ -512,8 +662,16 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onOpenSession = { selectedSession ->
+                            val panoramaFile = selectedSession.getPanoramaFile()
                             val meshFile = selectedSession.getMeshFile()
-                            if (meshFile != null && meshFile.exists()) {
+                            if (panoramaFile != null && panoramaFile.exists()) {
+                                // A 360 capture has no mesh or point cloud behind it:
+                                // what was produced is the stitched JPEG.
+                                activeSession = selectedSession
+                                activeMesh = null
+                                activeSplatPoints = emptyList()
+                                currentScreen = AppScreen.PANORAMA
+                            } else if (meshFile != null && meshFile.exists()) {
                                 activeSession = selectedSession
                                 processingIsPhotoMode = true
                                 currentScreen = AppScreen.PROCESSING
@@ -569,6 +727,12 @@ class MainActivity : ComponentActivity() {
                                 repository.renameScanSession(sessionToRename, newTitle)
                                 refreshGallery()
                             }
+                        },
+                        onToggleFavorite = { sessionToFav ->
+                            lifecycleScope.launch {
+                                repository.setFavorite(sessionToFav, !sessionToFav.isFavorite)
+                                refreshGallery()
+                            }
                         }
                     )
                 }
@@ -619,10 +783,12 @@ class MainActivity : ComponentActivity() {
                                         scanQualityState.value = ScanQualityState(frameCount = 0)
                                         isRecordingState.value = true
                                         checkAndInitAR()
+                                        recordPanoramaContext(newSession)
                                     }
                                 } else {
                                     scanStartedAtMs = System.currentTimeMillis()
                                     isRecordingState.value = true
+                                    currentActiveSession?.let { recordPanoramaContext(it) }
                                 }
                             } else {
                                 finishAndProcessScan()
@@ -649,8 +815,16 @@ class MainActivity : ComponentActivity() {
                         trainingIteration = trainingIteration,
                         trainingTotalIterations = trainingTotalIterations,
                         trainingLoss = trainingLoss,
-                        titleText = if (processingIsPhotoMode) "Building Photo Mesh" else "Processing 3D Splat Model",
-                        pointCountLabel = if (processingIsPhotoMode) "Vertices" else "Gaussians"
+                        titleText = when {
+                            processingIsPanorama -> "Stitching 360° Photo"
+                            processingIsPhotoMode -> "Building Photo Mesh"
+                            else -> "Processing 3D Splat Model"
+                        },
+                        pointCountLabel = when {
+                            processingIsPanorama -> "Sphere"
+                            processingIsPhotoMode -> "Vertices"
+                            else -> "Gaussians"
+                        }
                     )
                 }
 
@@ -661,6 +835,23 @@ class MainActivity : ComponentActivity() {
                             session = sessionToView,
                             points = activeSplatPoints,
                             mesh = activeMesh,
+                            onBackClicked = {
+                                currentScreen = AppScreen.GALLERY
+                                refreshGallery()
+                            }
+                        )
+                    } else {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text("Error: Session not found")
+                        }
+                    }
+                }
+
+                AppScreen.PANORAMA -> {
+                    val sessionToView = activeSession
+                    if (sessionToView != null) {
+                        PanoramaScreen(
+                            session = sessionToView,
                             onBackClicked = {
                                 currentScreen = AppScreen.GALLERY
                                 refreshGallery()
@@ -703,6 +894,33 @@ class MainActivity : ComponentActivity() {
                     }
                 )
             }
+            }
+        }
+    }
+
+    /**
+     * Records where and which way the phone was pointing when a 360° sweep
+     * starts. ARCore's world frame is arbitrary — it has no idea where north
+     * is — so without a compass reading taken from the same spot there is no
+     * way to write `GPano:PoseHeadingDegrees`, which Google Maps needs to
+     * display the panorama facing the right way; without the location there is
+     * no EXIF GPS, which the Street View Publish API rejects the photo for.
+     *
+     * The sensor read blocks for up to a quarter of a second, so it runs off the
+     * main thread and only for 360 captures. Any failure is cosmetic: the
+     * panorama still stitches, it just arrives without a heading or position.
+     */
+    private fun recordPanoramaContext(session: ScanSession) {
+        if (session.scanMode != ScanMode.PANORAMA) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val datasetDir = File(session.datasetDirPath)
+            val heading = CaptureContext.readCompassHeading(this@MainActivity)
+            val location = CaptureContext.readLastLocation(this@MainActivity)
+            CaptureContext.save(datasetDir, heading, location)
+            Log.i(
+                "MainActivity",
+                "360 capture context: heading=${heading ?: "none"}, location=${location ?: "none"}"
+            )
         }
     }
 

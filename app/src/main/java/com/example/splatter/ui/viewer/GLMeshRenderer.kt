@@ -45,6 +45,19 @@ class GLMeshRenderer : GLSurfaceView.Renderer {
     /** When true, draws only a wireframe instead of the shaded surface. */
     var wireframeMode = false
 
+    // Background colour used for the viewport clear (RGBA).
+    private var bgR = 0.04f
+    private var bgG = 0.043f
+    private var bgB = 0.058f
+
+    // "Home" framing captured from the mesh bounding box so Reset View can
+    // return to a view that actually frames the model (rather than the AR
+    // world origin, which can sit well outside the scanned object).
+    private var homeX = 0f
+    private var homeY = 0f
+    private var homeZ = 0f
+    private var homeDistance = 2.5f
+
     private var vertexBuffer: FloatBuffer? = null
     private var colorBuffer: FloatBuffer? = null
     private var normalBuffer: FloatBuffer? = null
@@ -76,6 +89,11 @@ class GLMeshRenderer : GLSurfaceView.Renderer {
         val maxDim = maxOf(sizeX, sizeY, sizeZ).coerceAtLeast(0.05f)
         cameraDistance = maxDim * 1.8f
 
+        homeX = targetX
+        homeY = targetY
+        homeZ = targetZ
+        homeDistance = cameraDistance
+
         vertexBuffer = toFloatBuffer(mesh.positions)
         colorBuffer = toFloatBuffer(mesh.colors)
         normalBuffer = toFloatBuffer(mesh.normals)
@@ -105,8 +123,22 @@ class GLMeshRenderer : GLSurfaceView.Renderer {
         ByteBuffer.allocateDirect(array.size * 4)
             .order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(array); position(0) }
 
+    fun setBackgroundColor(r: Float, g: Float, b: Float) {
+        bgR = r; bgG = g; bgB = b
+    }
+
+    /** Restore the framing captured from the mesh bounding box. */
+    fun resetView() {
+        targetX = homeX
+        targetY = homeY
+        targetZ = homeZ
+        cameraDistance = homeDistance
+        pitchDegrees = 20f
+        yawDegrees = 45f
+    }
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        GLES30.glClearColor(0.08f, 0.09f, 0.12f, 1.0f)
+        GLES30.glClearColor(bgR, bgG, bgB, 1.0f)
         GLES30.glEnable(GLES30.GL_DEPTH_TEST)
         GLES30.glDepthFunc(GLES30.GL_LEQUAL)
 
@@ -174,6 +206,7 @@ class GLMeshRenderer : GLSurfaceView.Renderer {
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        GLES30.glClearColor(bgR, bgG, bgB, 1.0f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT or GLES30.GL_DEPTH_BUFFER_BIT)
         if (indexCount == 0 || vertexBuffer == null) return
 

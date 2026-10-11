@@ -33,6 +33,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.splatter.model.ScanMode
 import com.example.splatter.model.ScanQualityState
+import com.example.splatter.ui.theme.Amber
+import com.example.splatter.ui.theme.Coral
+import androidx.compose.ui.text.style.TextOverflow
+import com.example.splatter.ui.theme.Fog
+import com.example.splatter.ui.theme.InkContainer
+import com.example.splatter.ui.theme.Mint
+import com.example.splatter.ui.theme.OnMint
+import com.example.splatter.ui.theme.Periwinkle
+import com.example.splatter.ui.theme.Sky
 
 @Composable
 fun ScanScreen(
@@ -87,7 +96,7 @@ fun ScanScreen(
 
                 Card(
                     colors = CardDefaults.cardColors(
-                        containerColor = if (isRecording) Color(0xFFE53935).copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.65f)
+                        containerColor = if (isRecording) Coral.copy(alpha = 0.9f) else Color.Black.copy(alpha = 0.65f)
                     ),
                     shape = CircleShape
                 ) {
@@ -99,7 +108,7 @@ fun ScanScreen(
                             modifier = Modifier
                                 .size(10.dp)
                                 .background(
-                                    if (isRecording) Color.White else Color(0xFF4CAF50),
+                                    if (isRecording) Color.White else Mint,
                                     CircleShape
                                 )
                         )
@@ -142,7 +151,7 @@ fun ScanScreen(
 
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        val metricColor = if (scanQuality.tracking == "Good") Color(0xFF4CAF50) else Color(0xFFFFC107)
+                        val metricColor = if (scanQuality.tracking == "Good") Mint else Amber
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -215,7 +224,7 @@ fun ScanScreen(
                                                 .weight(1f)
                                                 .height(12.dp)
                                                 .background(
-                                                    if (isCovered) Color(0xFF4CAF50) else Color.White.copy(alpha = 0.12f),
+                                                    if (isCovered) Mint else Color.White.copy(alpha = 0.12f),
                                                     RoundedCornerShape(2.dp)
                                                 )
                                         )
@@ -251,82 +260,45 @@ fun ScanScreen(
 
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        // Segmented Control
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF1E222D), RoundedCornerShape(14.dp))
-                                .padding(4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            ScanMode.entries.forEach { mode ->
-                                val isSelected = mode == selectedMode
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(
-                                            if (isSelected) Color(0xFF6200EE) else Color.Transparent
-                                        )
-                                        .clickable { onModeSelected(mode) }
-                                        .padding(vertical = 10.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = when (mode) {
-                                            ScanMode.OBJECT -> "📦 Object"
-                                            ScanMode.ROOM -> "🏠 Room"
-                                            ScanMode.PHOTO -> "📷 Photo Mesh"
-                                            ScanMode.PHOTO_SFM -> "🔭 Photo SfM"
-                                        },
-                                        color = if (isSelected) Color.White else Color.White.copy(alpha = 0.6f),
-                                        fontSize = 13.sp,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                                    )
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // Selected Mode Settings Summary Card
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
-                                .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
-                                .padding(12.dp)
-                        ) {
-                            Column {
+                        // Five modes no longer fit in one segmented row: each
+                        // segment got ~70 dp and the labels wrapped or clipped.
+                        // Two columns of cards give every mode an icon, its name
+                        // and its key parameter on their own lines.
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ScanMode.entries.chunked(2).forEach { rowModes ->
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Text(
-                                        text = "Depth: ${selectedMode.minDepthMeters}–${selectedMode.maxDepthMeters} m",
-                                        color = Color(0xFF03DAC6),
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    Text(
-                                        text = "Voxel: ${when (selectedMode) {
-                                            ScanMode.OBJECT -> "4–6 mm"
-                                            ScanMode.ROOM -> "10–20 mm"
-                                            ScanMode.PHOTO -> "10 mm"
-                                            ScanMode.PHOTO_SFM -> "12 mm"
-                                        }}",
-                                        color = Color(0xFFBB86FC),
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
+                                    rowModes.forEach { mode ->
+                                        ModeCard(
+                                            mode = mode,
+                                            isSelected = mode == selectedMode,
+                                            modifier = Modifier.weight(1f),
+                                            onClick = { onModeSelected(mode) }
+                                        )
+                                    }
+                                    // Odd number of modes: keep the last card at
+                                    // half width instead of stretching it.
+                                    if (rowModes.size == 1) Spacer(Modifier.weight(1f))
                                 }
+                            }
 
-                                Spacer(modifier = Modifier.height(4.dp))
-
+                            // What the selected mode is actually good for. The
+                            // depth range and voxel size already sit on each
+                            // card, and a 360 capture has neither.
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+                                    .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                            ) {
                                 Text(
                                     text = selectedMode.description,
                                     color = Color.White.copy(alpha = 0.85f),
-                                    fontSize = 11.sp
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp
                                 )
                             }
                         }
@@ -336,8 +308,8 @@ fun ScanScreen(
                         // Locked Mode Badge
                         Row(
                             modifier = Modifier
-                                .background(Color(0xFF6200EE).copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                                .border(1.dp, Color(0xFF6200EE), RoundedCornerShape(12.dp))
+                                .background(Mint.copy(alpha = 0.18f), RoundedCornerShape(12.dp))
+                                .border(1.dp, Mint, RoundedCornerShape(12.dp))
                                 .padding(horizontal = 16.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -347,8 +319,9 @@ fun ScanScreen(
                                     ScanMode.ROOM -> "🏠 ROOM MODE ($frameCount frames)"
                                     ScanMode.PHOTO -> "📷 PHOTO MESH MODE ($frameCount photos)"
                                     ScanMode.PHOTO_SFM -> "🔭 PHOTO SfM MODE ($frameCount photos)"
+                                    ScanMode.PANORAMA -> "🌐 360 PHOTO ($frameCount frames)"
                                 },
-                                color = Color.White,
+                                color = Mint,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -359,6 +332,10 @@ fun ScanScreen(
                     // Scan Guidance Prompt
                     Text(
                         text = when {
+                            selectedMode == ScanMode.PANORAMA && isRecording ->
+                                "Stand still and sweep slowly all the way around, then STOP."
+                            selectedMode == ScanMode.PANORAMA ->
+                                "Stand in one spot and tap REC, then sweep the phone slowly through a full 360°."
                             isRecording -> "Moving around subject... Tap STOP when done."
                             frameCount > 0 -> "Snap more photos from different angles, then tap FINISH."
                             selectedMode == ScanMode.PHOTO_SFM -> "Orbit subject — snap manual photos (8–30 photos with 60%+ overlap) or tap REC."
@@ -382,7 +359,7 @@ fun ScanScreen(
                         if (!isRecording) {
                             Button(
                                 onClick = onTakeSinglePhoto,
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E676)),
+                                colors = ButtonDefaults.buttonColors(containerColor = Mint, contentColor = OnMint),
                                 shape = CircleShape,
                                 modifier = Modifier.size(68.dp)
                             ) {
@@ -396,7 +373,7 @@ fun ScanScreen(
                         Button(
                             onClick = onToggleRecording,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isRecording) Color(0xFFE53935) else Color.White
+                                containerColor = if (isRecording) Coral else Color.White
                             ),
                             shape = CircleShape,
                             modifier = Modifier.size(68.dp)
@@ -413,13 +390,13 @@ fun ScanScreen(
                         if (frameCount > 0 && !isRecording) {
                             Button(
                                 onClick = onFinishScan,
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFBB86FC)),
+                                colors = ButtonDefaults.buttonColors(containerColor = Periwinkle, contentColor = Color(0xFF10121A)),
                                 shape = CircleShape,
                                 modifier = Modifier.size(68.dp)
                             ) {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text("✓", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                                    Text("DONE", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                    Text("✓", color = Color(0xFF10121A), fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                                    Text("DONE", color = Color(0xFF10121A), fontWeight = FontWeight.Bold, fontSize = 10.sp)
                                 }
                             }
                         }
@@ -427,5 +404,65 @@ fun ScanScreen(
                 }
             }
         }
+    }
+}
+
+/** Short name for a mode, icon first — the mode cards and the locked badge. */
+private fun modeLabel(mode: ScanMode): String = when (mode) {
+    ScanMode.OBJECT -> "📦  Object"
+    ScanMode.ROOM -> "🏠  Room"
+    ScanMode.PHOTO -> "📷  Photo Mesh"
+    ScanMode.PHOTO_SFM -> "🔭  Photo SfM"
+    ScanMode.PANORAMA -> "🌐  360 Photo"
+}
+
+/** The one line that distinguishes a mode from its neighbour on the grid. */
+private fun modeHint(mode: ScanMode): String = when (mode) {
+    ScanMode.OBJECT -> "0.3–2.5 m · 5 mm splats"
+    ScanMode.ROOM -> "0.5–5 m · 15 mm splats"
+    ScanMode.PHOTO -> "0.3–5 m · 4 mm mesh"
+    ScanMode.PHOTO_SFM -> "depth-free · 12 mm mesh"
+    ScanMode.PANORAMA -> "one spot · 2:1 photo"
+}
+
+/**
+ * One mode in the selector grid. The selected card is filled with the app's
+ * accent so the current mode reads at a glance, with the parameter line kept
+ * quieter than the name.
+ */
+@Composable
+private fun ModeCard(
+    mode: ScanMode,
+    isSelected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (isSelected) Mint else InkContainer)
+            .border(
+                1.dp,
+                if (isSelected) Mint else Color.White.copy(alpha = 0.10f),
+                RoundedCornerShape(12.dp)
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 10.dp, vertical = 9.dp)
+    ) {
+        Text(
+            text = modeLabel(mode),
+            color = if (isSelected) OnMint else Color.White.copy(alpha = 0.9f),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = modeHint(mode),
+            color = if (isSelected) OnMint.copy(alpha = 0.7f) else Fog,
+            fontSize = 10.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }

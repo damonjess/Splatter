@@ -249,7 +249,9 @@ object PhotogrammetryProcessor {
             FrameProcessor.ProcessingProgress(
                 "Photo mesh ready — ${mesh.triangleCount} triangles",
                 98,
-                mesh.vertexCount
+                mesh.vertexCount,
+                note = "Fused ARCore depth from %d frames + photo colours into %,d triangles"
+                    .format(frames.size, mesh.triangleCount)
             )
         )
         mesh
@@ -340,10 +342,10 @@ object PhotogrammetryProcessor {
         return result
     }
 
+    /** Reads a pose file, converting the ARCore pose into pipeline camera space. */
     private fun parsePoseMatrix(poseFile: File): FloatArray? {
         return try {
-            val parts = poseFile.readText().trim().split(",")
-            if (parts.size == 16) FloatArray(16) { i -> parts[i].trim().toFloat() } else null
+            CameraPose.parsePoseFile(poseFile.readText())
         } catch (_: Exception) {
             null
         }

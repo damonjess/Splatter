@@ -13,9 +13,15 @@ data class ScanSession(
     var plyFilePath: String? = null,
     var splatFilePath: String? = null,
     var meshFilePath: String? = null,
-    var thumbnailPath: String? = null
+    var thumbnailPath: String? = null,
+    var isFavorite: Boolean = false,
+    /** One-line summary of how this scan was reconstructed (set after processing). */
+    var processingNote: String? = null,
+    /** 360° panorama JPEG, when this scan was captured in 360 Photo mode. */
+    var panoramaFilePath: String? = null
 ) {
     fun getDatasetDir(): File = File(datasetDirPath)
+    fun getPanoramaFile(): File? = panoramaFilePath?.let { File(it) }
     fun getPlyFile(): File? = plyFilePath?.let { File(it) }
     fun getSplatFile(): File? = splatFilePath?.let { File(it) }
     fun getMeshFile(): File? = meshFilePath?.let { File(it) }
