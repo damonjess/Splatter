@@ -18,4 +18,12 @@ keystore.properties
 .cxx
 local.properties
 /splatter_exports/
-/diagnostics/
+
+# Scan diagnostics: the tooling (the two scripts and the README) is versioned,
+# because the app's README explains how to reproduce a diagnosis with it. What
+# it *generates* is not: reports embed renders and are tens to hundreds of KB.
+/diagnostics/*.html
+/diagnostics/*.png
+/diagnostics/*.json
+/diagnostics/__pycache__/
+__pycache__/
