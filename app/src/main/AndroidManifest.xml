@@ -12,6 +12,11 @@
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
+    <!-- Needed only to publish a 360° photo to Google Street View / Maps. The
+         app works completely offline without ever using it; nothing is uploaded
+         unless you press "Publish" on a panorama. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <uses-feature android:name="android.hardware.camera" android:required="true" />
     <uses-feature android:name="android.hardware.camera.ar" android:required="true" />
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />

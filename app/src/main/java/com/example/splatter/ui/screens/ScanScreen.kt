@@ -55,12 +55,14 @@ fun ScanScreen(
     onTakeSinglePhoto: () -> Unit,
     onFinishScan: () -> Unit,
     onBackClicked: () -> Unit,
-    glSurfaceViewProvider: () -> GLSurfaceView
+    glSurfaceViewProvider: () -> GLSurfaceView,
+    onSurfaceReleased: (GLSurfaceView) -> Unit = {}
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
         // Live AR Camera Feed
         AndroidView(
             factory = { glSurfaceViewProvider() },
+            onRelease = { onSurfaceReleased(it) },
             modifier = Modifier.fillMaxSize()
         )
 

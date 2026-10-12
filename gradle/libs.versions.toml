@@ -9,9 +9,12 @@ activityCompose = "1.13.0"
 kotlin = "2.2.10"
 composeBom = "2026.02.01"
 arcore = "1.56.0"
+# Authorization for the Street View publish flow (AuthorizationClient).
+playServicesAuth = "22.0.0"
 
 [libraries]
 arcore = { group = "com.google.ar", name = "core", version.ref = "arcore" }
+play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
