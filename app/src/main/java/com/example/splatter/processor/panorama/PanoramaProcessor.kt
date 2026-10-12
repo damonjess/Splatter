@@ -42,8 +42,8 @@ object PanoramaProcessor {
      *  doesn't contribute forty frames of the same direction. */
     private const val MIN_ANGLE_STEP_DEG = 12f
 
-    /** Longest side of each decoded source photo. */
-    private const val FRAME_MAX_DIM = 1600
+    /** Longest side of each decoded source photo; keep detail for sharp seams. */
+    private const val FRAME_MAX_DIM = 1920
 
     /** Below this coverage the capture missed too much of the sphere to publish. */
     const val MIN_COVERAGE = 0.35f
@@ -98,7 +98,7 @@ object PanoramaProcessor {
         val bitmap = Bitmap.createBitmap(result.pixels, result.width, result.height, Bitmap.Config.ARGB_8888)
         onProgress(FrameProcessor.ProcessingProgress("Compressing panorama JPEG...", 82, 0))
         val jpegBytes = ByteArrayOutputStream().use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
             bitmap.recycle()
             out.toByteArray()
         }

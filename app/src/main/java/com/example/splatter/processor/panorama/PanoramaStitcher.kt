@@ -67,10 +67,9 @@ class PanoramaStitcher(
     fun stitch(frames: List<Frame>, onProgress: ((Int) -> Unit)? = null): Result {
         require(frames.isNotEmpty()) { "no frames to stitch" }
 
-        // A 4096x2048 panorama is 8.4 M pixels. Accumulating three floats plus a
-        // weight for all of them at once is ~170 MB, which a phone will not give
-        // us; accumulating one horizontal band at a time keeps the working set at
-        // a few megabytes for exactly the same number of samples.
+        // Work one horizontal band at a time. Each output pixel keeps the best
+        // front-facing source sample rather than averaging several slightly
+        // misregistered frames, which is what causes ghosting on real captures.
         val out = IntArray(outputWidth * outputHeight)
         val weightSum = FloatArray(outputWidth * outputHeight)
         val used = BooleanArray(frames.size)
@@ -81,13 +80,11 @@ class PanoramaStitcher(
         while (rowStart < outputHeight) {
             val rowEnd = (rowStart + bandRows).coerceAtMost(outputHeight)
             val bandSize = (rowEnd - rowStart) * outputWidth
-            val accR = FloatArray(bandSize)
-            val accG = FloatArray(bandSize)
-            val accB = FloatArray(bandSize)
             val bandWeight = FloatArray(bandSize)
+            val bestColor = IntArray(bandSize)
 
             for ((i, frame) in frames.withIndex()) {
-                if (accumulate(frame, rowStart, rowEnd, accR, accG, accB, bandWeight)) used[i] = true
+                if (accumulate(frame, rowStart, rowEnd, bandWeight, bestColor)) used[i] = true
             }
 
             for (y in rowStart until rowEnd) {
@@ -96,15 +93,7 @@ class PanoramaStitcher(
                     val o = y * outputWidth + x
                     val w = bandWeight[b]
                     weightSum[o] = w
-                    out[o] = if (w > 1e-6f) {
-                        val inv = 1f / w
-                        (0xFF shl 24) or
-                            ((accR[b] * inv * 255f).toInt().coerceIn(0, 255) shl 16) or
-                            ((accG[b] * inv * 255f).toInt().coerceIn(0, 255) shl 8) or
-                            (accB[b] * inv * 255f).toInt().coerceIn(0, 255)
-                    } else {
-                        HOLE_COLOR
-                    }
+                    out[o] = if (w > 1e-6f) bestColor[b] else HOLE_COLOR
                 }
             }
             rowStart = rowEnd
@@ -121,10 +110,8 @@ class PanoramaStitcher(
         frame: Frame,
         rowStart: Int,
         rowEnd: Int,
-        accR: FloatArray,
-        accG: FloatArray,
-        accB: FloatArray,
-        weightSum: FloatArray
+        weightSum: FloatArray,
+        bestColor: IntArray
     ): Boolean {
         val m = frame.pose
         val w = frame.width
@@ -166,13 +153,13 @@ class PanoramaStitcher(
 
                 val color = sampleBilinear(frame.pixels, w, h, u, v)
                 val idx = (y - rowStart) * outputWidth + x
-                val r = ((color shr 16) and 0xFF) / 255f
-                val g = ((color shr 8) and 0xFF) / 255f
-                val b = (color and 0xFF) / 255f
-                accR[idx] += r * weight
-                accG[idx] += g * weight
-                accB[idx] += b * weight
-                weightSum[idx] += weight
+                // Keep the highest-quality sample. Averaging frames with even
+                // a small pose error produces the visible double edges seen in
+                // windows, cars, and door frames.
+                if (weight > weightSum[idx]) {
+                    weightSum[idx] = weight
+                    bestColor[idx] = color
+                }
                 touched = true
             }
         }

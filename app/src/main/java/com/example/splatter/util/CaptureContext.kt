@@ -5,9 +5,15 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Location
+import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Looper
 import android.util.Log
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Records the two pieces of context a 360° photo needs beyond its pixels:
@@ -114,6 +120,48 @@ object CaptureContext {
         } catch (e: Exception) {
             Log.w(TAG, "Location read failed: ${e.message}")
             null
+        }
+    }
+
+    /** Requests a current fix, falling back to last-known data if needed. */
+    fun readCurrentLocation(context: Context, timeoutMs: Long = 6000): Pair<Double, Double>? {
+        val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+            ?: return readLastLocation(context)
+        val latest = AtomicReference<Location?>(null)
+        val latch = CountDownLatch(1)
+        val listener = object : LocationListener {
+            override fun onLocationChanged(location: Location) {
+                latest.set(location)
+                latch.countDown()
+            }
+        }
+        return try {
+            val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+            for (provider in providers) {
+                try {
+                    if (manager.isProviderEnabled(provider)) {
+                        manager.requestLocationUpdates(provider, 0L, 0f, listener, Looper.getMainLooper())
+                    }
+                } catch (_: SecurityException) {
+                    // Permission may have been revoked while the app was open.
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not request $provider location: ${e.message}")
+                }
+            }
+            latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+            latest.get()?.let { it.latitude to it.longitude } ?: readLastLocation(context)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Current location permission unavailable: ${e.message}")
+            readLastLocation(context)
+        } catch (e: Exception) {
+            Log.w(TAG, "Current location read failed: ${e.message}")
+            readLastLocation(context)
+        } finally {
+            try {
+                manager.removeUpdates(listener)
+            } catch (_: Exception) {
+                // Best-effort cleanup.
+            }
         }
     }
 

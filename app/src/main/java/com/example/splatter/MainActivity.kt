@@ -154,6 +154,14 @@ class MainActivity : ComponentActivity() {
                         == PackageManager.PERMISSION_GRANTED
                 )
             }
+            var hasLocationPermission by remember {
+                mutableStateOf(
+                    ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED ||
+                        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
+                            == PackageManager.PERMISSION_GRANTED
+                )
+            }
 
             // Camera is required; location is optional and only used to write GPS
             // tags into a 360° panorama so Google Maps can place it.
@@ -162,16 +170,19 @@ class MainActivity : ComponentActivity() {
             ) { granted ->
                 hasCameraPermission = granted[Manifest.permission.CAMERA]
                     ?: hasCameraPermission
+                hasLocationPermission = granted[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                    granted[Manifest.permission.ACCESS_COARSE_LOCATION] == true || hasLocationPermission
             }
 
             LaunchedEffect(Unit) {
-                if (!hasCameraPermission) {
-                    permissionLauncher.launch(
-                        arrayOf(
-                            Manifest.permission.CAMERA,
-                            Manifest.permission.ACCESS_FINE_LOCATION
-                        )
-                    )
+                if (!hasCameraPermission || !hasLocationPermission) {
+                    permissionLauncher.launch(buildList {
+                        if (!hasCameraPermission) add(Manifest.permission.CAMERA)
+                        if (!hasLocationPermission) {
+                            add(Manifest.permission.ACCESS_FINE_LOCATION)
+                            add(Manifest.permission.ACCESS_COARSE_LOCATION)
+                        }
+                    }.toTypedArray())
                 }
                 scanSessions = repository.getScanSessions()
             }
@@ -934,7 +945,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             val datasetDir = File(session.datasetDirPath)
             val heading = CaptureContext.readCompassHeading(this@MainActivity)
-            val location = CaptureContext.readLastLocation(this@MainActivity)
+            val location = CaptureContext.readCurrentLocation(this@MainActivity)
             CaptureContext.save(datasetDir, heading, location)
             Log.i(
                 "MainActivity",
