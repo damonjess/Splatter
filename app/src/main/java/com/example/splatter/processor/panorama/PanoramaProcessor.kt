@@ -58,35 +58,52 @@ object PanoramaProcessor {
         val frames = selectFrames(datasetDir, onProgress) ?: return@withContext null
         onProgress(
             FrameProcessor.ProcessingProgress(
-                "Stitching ${frames.size} frames into a 360° panorama...",
-                25,
+                "Checking ${frames.size} selected views...",
+                23,
                 0
             )
         )
 
         val stitcher = PanoramaStitcher(OUTPUT_WIDTH, OUTPUT_HEIGHT)
         val coverage = stitcher.coverage(frames)
+        onProgress(
+            FrameProcessor.ProcessingProgress(
+                "Stitching ${frames.size} frames into a 360° panorama...",
+                25,
+                0
+            )
+        )
         if (coverage < MIN_COVERAGE) {
             Log.w(TAG, "Panorama coverage too low: ${(coverage * 100).toInt()}%")
             return@withContext null
         }
 
-        val result = stitcher.stitch(frames)
+        val result = stitcher.stitch(frames) { stitchProgress ->
+            onProgress(
+                FrameProcessor.ProcessingProgress(
+                    "Stitching panorama...",
+                    (25 + stitchProgress).coerceAtMost(75),
+                    0
+                )
+            )
+        }
         onProgress(
             FrameProcessor.ProcessingProgress(
-                "Writing 360° image (%.0f%% of the sphere covered)...".format(result.coverage * 100f),
-                75,
+                "Encoding 360° image (%.0f%% of the sphere covered)...".format(result.coverage * 100f),
+                78,
                 0
             )
         )
 
         val bitmap = Bitmap.createBitmap(result.pixels, result.width, result.height, Bitmap.Config.ARGB_8888)
+        onProgress(FrameProcessor.ProcessingProgress("Compressing panorama JPEG...", 82, 0))
         val jpegBytes = ByteArrayOutputStream().use { out ->
             bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
             bitmap.recycle()
             out.toByteArray()
         }
 
+        onProgress(FrameProcessor.ProcessingProgress("Adding panorama metadata...", 90, 0))
         val (latitude, longitude) = readLocation(datasetDir)
         val withMetadata = PanoramaMetadata.insert(
             jpeg = jpegBytes,
@@ -96,12 +113,14 @@ object PanoramaProcessor {
         )
 
         val outFile = File(datasetDir, PANORAMA_FILENAME)
+        onProgress(FrameProcessor.ProcessingProgress("Saving finished 360° image...", 97, 0))
         outFile.writeBytes(withMetadata)
         Log.i(
             TAG,
             "Wrote ${outFile.name}: ${result.width}x${result.height}, ${withMetadata.size / 1024} KB, " +
                 "coverage ${(result.coverage * 100).toInt()}%, gps=${latitude != null}"
         )
+        onProgress(FrameProcessor.ProcessingProgress("360° image complete", 100, 0))
         outFile
     }
 

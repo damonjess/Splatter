@@ -51,6 +51,8 @@ fun ScanScreen(
     frameCount: Int,
     statusText: String,
     scanQuality: ScanQualityState,
+    panoramaCoverageCells: Set<Int> = emptySet(),
+    panoramaCurrentCell: Int = -1,
     onToggleRecording: () -> Unit,
     onTakeSinglePhoto: () -> Unit,
     onFinishScan: () -> Unit,
@@ -347,6 +349,14 @@ fun ScanScreen(
                         fontWeight = FontWeight.Medium
                     )
 
+                    if (selectedMode == ScanMode.PANORAMA && isRecording) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        PanoramaCoverageMap(
+                            coveredCells = panoramaCoverageCells,
+                            currentCell = panoramaCurrentCell
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(14.dp))
 
                     // Shutter & Recording Control Row
@@ -404,6 +414,58 @@ fun ScanScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun PanoramaCoverageMap(coveredCells: Set<Int>, currentCell: Int) {
+    val columns = 12
+    val rows = 6
+    val captured = coveredCells.size
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(12.dp))
+            .border(1.dp, Mint.copy(alpha = 0.65f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("UP", color = Fog, fontSize = 8.sp, modifier = Modifier.width(20.dp))
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                repeat(rows) { row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        repeat(columns) { column ->
+                            val cell = row * columns + column
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(11.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(
+                                        when {
+                                            cell == currentCell -> Amber
+                                            cell in coveredCells -> Mint
+                                            else -> Color.White.copy(alpha = 0.18f)
+                                        }
+                                    )
+                            )
+                        }
+                    }
+                }
+            }
+            Text("DOWN", color = Fog, fontSize = 8.sp, modifier = Modifier.width(32.dp))
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = "SPHERE COVERAGE  $captured/${columns * rows} areas (${(captured * 100) / (columns * rows)}%)  •  " +
+                "green = captured, gray = still needed",
+            color = Color.White.copy(alpha = 0.9f),
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 

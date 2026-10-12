@@ -64,7 +64,7 @@ class PanoramaStitcher(
      * Stitches [frames] into an equirectangular image in the coordinate frame of
      * the FIRST frame (its optical axis points at the panorama's centre).
      */
-    fun stitch(frames: List<Frame>): Result {
+    fun stitch(frames: List<Frame>, onProgress: ((Int) -> Unit)? = null): Result {
         require(frames.isNotEmpty()) { "no frames to stitch" }
 
         // A 4096x2048 panorama is 8.4 M pixels. Accumulating three floats plus a
@@ -76,6 +76,8 @@ class PanoramaStitcher(
         val used = BooleanArray(frames.size)
 
         var rowStart = 0
+        val totalBands = (outputHeight + bandRows - 1) / bandRows
+        var completedBands = 0
         while (rowStart < outputHeight) {
             val rowEnd = (rowStart + bandRows).coerceAtMost(outputHeight)
             val bandSize = (rowEnd - rowStart) * outputWidth
@@ -106,6 +108,8 @@ class PanoramaStitcher(
                 }
             }
             rowStart = rowEnd
+            completedBands++
+            onProgress?.invoke((completedBands * 50 / totalBands).coerceIn(1, 50))
         }
 
         val covered = weightSum.count { it > 1e-6f }

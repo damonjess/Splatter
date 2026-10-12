@@ -74,6 +74,9 @@ import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import kotlin.math.atan2
+import kotlin.math.floor
+import kotlin.math.PI
 import kotlin.math.sqrt
 
 enum class AppScreen {
@@ -102,6 +105,10 @@ class MainActivity : ComponentActivity() {
     private val frameCountState = mutableStateOf(0)
     private val trackingStatusText = mutableStateOf("Initializing AR...")
     private val scanQualityState = mutableStateOf(ScanQualityState())
+    // 12 yaw columns × 6 pitch bands show the part of the sphere still missing.
+    private val panoramaCoverageCellsState = mutableStateOf<Set<Int>>(emptySet())
+    private val panoramaCurrentCellState = mutableIntStateOf(-1)
+    private var panoramaReferenceYawRadians: Float? = null
     private val pendingManualCapture = AtomicBoolean(false)
 
     private var currentActiveSession: ScanSession? = null
@@ -753,6 +760,8 @@ class MainActivity : ComponentActivity() {
                         frameCount = frameCountState.value,
                         statusText = trackingStatusText.value,
                         scanQuality = scanQualityState.value,
+                        panoramaCoverageCells = panoramaCoverageCellsState.value,
+                        panoramaCurrentCell = panoramaCurrentCellState.intValue,
                         onTakeSinglePhoto = {
                             lifecycleScope.launch {
                                 if (currentActiveSession == null) {
@@ -780,6 +789,11 @@ class MainActivity : ComponentActivity() {
                                         frameCountState.value = 0
                                         scanStartedAtMs = System.currentTimeMillis()
                                         lastCameraPosition = null
+                                        if (selectedScanMode == ScanMode.PANORAMA) {
+                                            panoramaCoverageCellsState.value = emptySet()
+                                            panoramaCurrentCellState.intValue = -1
+                                            panoramaReferenceYawRadians = null
+                                        }
                                         scanQualityState.value = ScanQualityState(frameCount = 0)
                                         isRecordingState.value = true
                                         checkAndInitAR()
@@ -787,6 +801,11 @@ class MainActivity : ComponentActivity() {
                                     }
                                 } else {
                                     scanStartedAtMs = System.currentTimeMillis()
+                                    if (currentActiveSession?.scanMode == ScanMode.PANORAMA) {
+                                        panoramaCoverageCellsState.value = emptySet()
+                                        panoramaCurrentCellState.intValue = -1
+                                        panoramaReferenceYawRadians = null
+                                    }
                                     isRecordingState.value = true
                                     currentActiveSession?.let { recordPanoramaContext(it) }
                                 }
@@ -1186,6 +1205,36 @@ class MainActivity : ComponentActivity() {
                     sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
                 } else 0f
                 lastCameraPosition = currentPose.clone()
+
+                // ARCore's world heading is arbitrary, but relative rotation
+                // from the first direction is stable and shows which part of
+                // the sweep is still missing.
+                if (isRecordingState.value && currentActiveSession?.scanMode == ScanMode.PANORAMA &&
+                    trackingState == TrackingState.TRACKING
+                ) {
+                    val poseMatrix = FloatArray(16)
+                    frame.camera.pose.toMatrix(poseMatrix, 0)
+                    val forwardX = -poseMatrix[8]
+                    val forwardY = -poseMatrix[9]
+                    val forwardZ = -poseMatrix[10]
+                    val horizontalLength = sqrt(forwardX * forwardX + forwardZ * forwardZ)
+                    if (horizontalLength > 0.01f) {
+                        val yaw = atan2(forwardX, forwardZ)
+                        val reference = panoramaReferenceYawRadians ?: yaw.also {
+                            panoramaReferenceYawRadians = it
+                        }
+                        val twoPi = 2f * PI.toFloat()
+                        var delta = (yaw - reference) % twoPi
+                        if (delta < 0f) delta += twoPi
+                        val column = floor(delta / twoPi * 12f).toInt().coerceIn(0, 11)
+                        val pitch = atan2(forwardY, horizontalLength)
+                        val row = floor(((pitch / PI.toFloat()) + 0.5f) * 6f)
+                            .toInt().coerceIn(0, 5)
+                        val cell = row * 12 + column
+                        panoramaCoverageCellsState.value = panoramaCoverageCellsState.value + cell
+                        panoramaCurrentCellState.intValue = cell
+                    }
+                }
 
                 val quality = ScanQualityEvaluator.evaluateLive(
                     trackingState = trackingState,
