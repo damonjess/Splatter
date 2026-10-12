@@ -14,9 +14,10 @@ import kotlin.math.tan
  * as a ray from the camera and sampled where that ray hits the sphere.
  *
  * Pixel coordinates follow the usual equirectangular convention:
- * `u = 0.5` is the centre of the image (longitude 0), `v = 0` is the top row
- * (latitude +90°). Yaw 0 looks at the image centre, positive yaw turns right
- * (increasing longitude).
+ * `u = 0.5` is the centre of the image (longitude 0). Captured camera frames
+ * use the opposite vertical image convention to the viewer, so the source row
+ * is vertically flipped when sampled. Yaw 0 looks at the image centre,
+ * positive yaw turns right (increasing longitude).
  */
 class EquirectSampler(
     private val source: IntArray,
@@ -93,9 +94,15 @@ class EquirectSampler(
 
     /** Nearest-neighbour lookup of a (longitude, latitude) direction. */
     private fun sample(longitudeRadians: Float, latitudeRadians: Float): Int {
-        var u = 0.5f + longitudeRadians / TWO_PI
+        // The captured equirectangular frames run in the opposite horizontal
+        // direction to the viewer's longitude convention. Flip the source
+        // column so left and right are not mirrored in the 360 view.
+        var u = 0.5f - longitudeRadians / TWO_PI
         u -= kotlin.math.floor(u) // wrap into [0, 1)
-        var v = 0.5f - latitudeRadians / PI
+        // ARCore camera JPEGs are vertically inverted relative to the
+        // viewer's +latitude-up convention. Keep sky at the top and ground at
+        // the bottom by flipping the source row here.
+        var v = 0.5f + latitudeRadians / PI
         v = v.coerceIn(0f, 1f)
 
         val sx = (u * sourceWidth).toInt().coerceIn(0, sourceWidth - 1)

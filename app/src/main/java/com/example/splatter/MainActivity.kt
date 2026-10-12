@@ -57,7 +57,6 @@ import com.example.splatter.ui.screens.ScanScreen
 import com.example.splatter.ui.screens.ViewerScreen
 import com.example.splatter.util.CaptureContext
 import com.example.splatter.util.FrameSaver
-import com.example.splatter.util.PreviewTrace
 import com.example.splatter.util.ScanQualityEvaluator
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
@@ -89,20 +88,10 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         private const val TAG = "MainActivity"
-
-        /** Patch size, in pixels, for the framebuffer read-back in [ARCameraRenderer]. */
-        private const val READBACK_SIZE = 32
     }
 
     private var session: Session? = null
     private var glSurfaceView: GLSurfaceView? = null
-
-    /**
-     * Incremented for every EGL context the preview has rendered in. ARCore ties
-     * its camera feed to a texture name from one context, so a new context is the
-     * trigger to rebuild the session — see [ARCameraRenderer.onSurfaceCreated].
-     */
-    private var glContextGeneration = 0
     private var arCameraRenderer: ARCameraRenderer? = null
     private var userRequestedInstall = true
 
@@ -126,8 +115,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         repository = ScanRepository(applicationContext)
-        PreviewTrace.init(this, true)
-        PreviewTrace.log("ui", "onCreate session=${session?.hashCode()}")
 
         setContent {
             SplatterTheme {
@@ -815,15 +802,7 @@ class MainActivity : ComponentActivity() {
                             currentScreen = AppScreen.GALLERY
                             refreshGallery()
                         },
-                        glSurfaceViewProvider = { createCameraSurfaceView() },
-                        onSurfaceReleased = { released ->
-                            PreviewTrace.log(
-                                "surface",
-                                "RELEASED view=${released.hashCode()} parent=${released.parent?.javaClass?.simpleName} " +
-                                    "isAttached=${released.isAttachedToWindow} isCurrent=${released === glSurfaceView}"
-                            )
-                            if (released === glSurfaceView) glSurfaceView = null
-                        }
+                        glSurfaceViewProvider = { getOrCreateGLSurfaceView() }
                     )
                 }
 
@@ -996,26 +975,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Closes and recreates the AR session so its camera texture is registered
-     * against the GL context that is currently on screen. Called when the scan
-     * screen's surface is recreated — see the comment in [ARCameraRenderer.onSurfaceCreated].
-     */
-    private fun rebuildArSessionForNewGlContext() {
-        PreviewTrace.log("ui", "SESSION_REBUILD_FOR_NEW_CONTEXT session=${session?.hashCode()}")
-        val stale = session
-        session = null
-        try {
-            stale?.pause()
-            stale?.close()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error closing session before rebuild: ${e.message}")
-            PreviewTrace.log("ui", "SESSION_REBUILD_CLOSE_FAILED ${e.message}")
-        }
-        arCameraRenderer?.resetTextureBinding()
-        checkAndInitAR()
-    }
-
     private fun initARSession() {
         if (session != null) return
         try {
@@ -1039,36 +998,23 @@ class MainActivity : ComponentActivity() {
             session = arSession
             arCameraRenderer?.resetTextureBinding()
             Log.i(TAG, "AR Session created successfully with depthMode: ${config.depthMode}")
-            PreviewTrace.log("ui", "SESSION_CREATED session=${arSession.hashCode()} depth=${config.depthMode}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create AR session: ${e.message}", e)
-            PreviewTrace.log("ui", "SESSION_CREATE_FAILED ${e.javaClass.simpleName}: ${e.message}")
             trackingStatusText.value = "Failed: ${e.message}"
         }
     }
 
-    /**
-     * Builds the GL view that shows the AR camera feed for one scan screen.
-     *
-     * A *new* view is created every time the scan screen is composed rather than
-     * reusing one instance. Handing the same [GLSurfaceView] to a second Compose
-     * `AndroidView` node left the screen black even though the GL thread kept
-     * drawing and ARCore kept capturing frames: the recycled instance stayed
-     * attached to the first holder's surface, so its output was never composited
-     * on screen. A fresh view per screen also means a fresh EGL context, which is
-     * why [rebuildArSessionForNewGlContext] runs once the previous context is gone.
-     */
-    private fun createCameraSurfaceView(): GLSurfaceView {
-        val renderer = ARCameraRenderer().also { arCameraRenderer = it }
-        val view = GLSurfaceView(this).apply {
-            setEGLContextClientVersion(2)
-            setRenderer(renderer)
-            renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-            preserveEGLContextOnPause = true
+    private fun getOrCreateGLSurfaceView(): GLSurfaceView {
+        if (glSurfaceView == null) {
+            val renderer = ARCameraRenderer().also { arCameraRenderer = it }
+            glSurfaceView = GLSurfaceView(this).apply {
+                setEGLContextClientVersion(2)
+                setRenderer(renderer)
+                renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+            }
         }
-        glSurfaceView = view
-        PreviewTrace.log("surface", "CREATED view=${view.hashCode()} renderer=${renderer.hashCode()}")
-        return view
+        (glSurfaceView?.parent as? ViewGroup)?.removeView(glSurfaceView)
+        return glSurfaceView!!
     }
 
     override fun onResume() {
@@ -1078,10 +1024,8 @@ class MainActivity : ComponentActivity() {
                 session?.resume()
             }
             glSurfaceView?.onResume()
-            PreviewTrace.log("ui", "onResume session=${session?.hashCode()} view=${glSurfaceView?.hashCode()}")
         } catch (e: Exception) {
             Log.e(TAG, "Error resuming session: ${e.message}", e)
-            PreviewTrace.log("ui", "onResume FAILED ${e.message}")
         }
     }
 
@@ -1089,22 +1033,16 @@ class MainActivity : ComponentActivity() {
         super.onPause()
         glSurfaceView?.onPause()
         session?.pause()
-        PreviewTrace.log("ui", "onPause session=${session?.hashCode()} view=${glSurfaceView?.hashCode()}")
     }
 
     override fun onDestroy() {
         super.onDestroy()
         session?.close()
         session = null
-        PreviewTrace.log("ui", "onDestroy")
     }
 
     private inner class ARCameraRenderer : GLSurfaceView.Renderer {
         private var textureId = -1
-        private var surfaceWidth = 0
-        private var surfaceHeight = 0
-        private val readback = ByteBuffer.allocateDirect(READBACK_SIZE * READBACK_SIZE * 4)
-            .order(ByteOrder.nativeOrder())
         @Volatile
         private var isTextureBoundToSession = false
         private var quadProgram = 0
@@ -1122,44 +1060,10 @@ class MainActivity : ComponentActivity() {
         // full session recreation once it's clearly stuck rather than
         // transient.
         private var consecutiveUpdateFailures = 0
-        private var drawnFrames = 0
         private val maxConsecutiveFailuresBeforeReset = 60 // ~1-2s of frames
 
         fun resetTextureBinding() {
             isTextureBoundToSession = false
-        }
-
-        /**
-         * Mean luminance of a small patch of the framebuffer this renderer has just
-         * drawn the camera feed into. Comparing it with what is actually on screen
-         * separates "we never drew the camera" from "we drew it somewhere that is
-         * not being composited".
-         */
-        private fun describeFramebuffer(): String {
-            if (surfaceWidth < READBACK_SIZE || surfaceHeight < READBACK_SIZE) {
-                return "skipped (surface ${surfaceWidth}x$surfaceHeight)"
-            }
-            return try {
-                GLES20.glFinish()
-                readback.position(0)
-                GLES20.glReadPixels(
-                    (surfaceWidth - READBACK_SIZE) / 2,
-                    (surfaceHeight - READBACK_SIZE) / 2,
-                    READBACK_SIZE,
-                    READBACK_SIZE,
-                    GLES20.GL_RGBA,
-                    GLES20.GL_UNSIGNED_BYTE,
-                    readback
-                )
-                var sum = 0
-                for (i in 0 until READBACK_SIZE * READBACK_SIZE) {
-                    sum += readback.get(i * 4).toInt() and 0xFF
-                }
-                val mean = sum.toFloat() / (READBACK_SIZE * READBACK_SIZE)
-                "mean=%.1f size=${surfaceWidth}x$surfaceHeight glError=${GLES20.glGetError()}".format(mean)
-            } catch (e: Exception) {
-                "failed: ${e.message}"
-            }
         }
 
         private val vertices = floatArrayOf(
@@ -1203,33 +1107,13 @@ class MainActivity : ComponentActivity() {
             texCoordAttrib = GLES20.glGetAttribLocation(quadProgram, "t")
             texUniform = GLES20.glGetUniformLocation(quadProgram, "tex")
             isTextureBoundToSession = false
-            val contextGeneration = ++glContextGeneration
-            PreviewTrace.log(
-                "gl",
-                "SURFACE_CREATED renderer=${hashCode()} contextGeneration=$contextGeneration texture=$textureId " +
-                    "program=$quadProgram p=$positionAttrib t=$texCoordAttrib u=$texUniform " +
-                    "glError=${GLES20.glGetError()} session=${session?.hashCode()}"
-            )
-
-            // The texture above is brand new and lives in a brand new EGL context,
-            // but ARCore was told the texture's *name* by the previous context and
-            // never learns that the context (and with it that texture) is gone — a
-            // new context happily hands out the same numeric name again. The
-            // session is therefore rebuilt against the live context so ARCore is
-            // writing into a texture that is actually being drawn.
-            if (contextGeneration > 1) {
-                runOnUiThread { rebuildArSessionForNewGlContext() }
-            }
         }
 
         override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
             GLES20.glViewport(0, 0, width, height)
-            surfaceWidth = width
-            surfaceHeight = height
             @Suppress("DEPRECATION")
             val displayRotation = windowManager.defaultDisplay.rotation
             session?.setDisplayGeometry(displayRotation, width, height)
-            PreviewTrace.log("gl", "SURFACE_CHANGED renderer=${hashCode()} ${width}x${height} rot=$displayRotation")
         }
 
         override fun onDrawFrame(gl: GL10?) {
@@ -1241,10 +1125,8 @@ class MainActivity : ComponentActivity() {
                     activeSession.setCameraTextureName(textureId)
                     isTextureBoundToSession = true
                     Log.i(TAG, "Camera texture bound to AR session successfully.")
-                    PreviewTrace.log("gl", "TEXTURE_BOUND renderer=${hashCode()} texture=$textureId")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed binding camera texture: ${e.message}")
-                    PreviewTrace.log("gl", "TEXTURE_BIND_FAILED renderer=${hashCode()} ${e.message}")
                     return
                 }
             }
@@ -1252,7 +1134,6 @@ class MainActivity : ComponentActivity() {
             try {
                 val frame = activeSession.update()
                 consecutiveUpdateFailures = 0
-                drawnFrames++
 
                 // Crucial fix: rewind FloatBuffer positions before transformCoordinates2d
                 vertexBuffer.position(0)
@@ -1287,10 +1168,6 @@ class MainActivity : ComponentActivity() {
                 GLES20.glDisableVertexAttribArray(positionAttrib)
                 GLES20.glDisableVertexAttribArray(texCoordAttrib)
 
-                if (drawnFrames % 60 == 1) {
-                    PreviewTrace.log("gl", "FRAMEBUFFER ${describeFramebuffer()}")
-                }
-
                 val trackingState = frame.camera.trackingState
                 val planeCount = try {
                     activeSession.getAllTrackables(Plane::class.java).count { it.trackingState == TrackingState.TRACKING }
@@ -1300,16 +1177,6 @@ class MainActivity : ComponentActivity() {
 
                 val depthCoveragePercent = estimateDepthCoveragePercent(frame)
                 val brightness = estimateBrightness(frame)
-                if (drawnFrames % 60 == 1) {
-                    // The camera image ARCore hands the CPU is what the shader is
-                    // supposed to show: a bright value here with a black preview
-                    // means the GL path is broken, not the camera.
-                    PreviewTrace.log(
-                        "gl",
-                        "FRAME #$drawnFrames renderer=${hashCode()} tracking=${frame.camera.trackingState} " +
-                            "cameraImageBrightness=%.1f depthCoverage=$depthCoveragePercent texture=$textureId".format(brightness)
-                    )
-                }
                 val distanceMeters = estimateDistanceMeters(frame)
                 val currentPose = frame.camera.pose.translation
                 val motionMetersPerFrame = if (lastCameraPosition != null) {
@@ -1376,12 +1243,6 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 consecutiveUpdateFailures++
                 Log.w(TAG, "Frame render loop skipped (${e.javaClass.simpleName}, $consecutiveUpdateFailures in a row): ${e.message}")
-                if (consecutiveUpdateFailures == 1 || consecutiveUpdateFailures % 30 == 0) {
-                    PreviewTrace.log(
-                        "gl",
-                        "FRAME_FAILED #$consecutiveUpdateFailures ${e.javaClass.simpleName}: ${e.message}"
-                    )
-                }
                 if (consecutiveUpdateFailures >= maxConsecutiveFailuresBeforeReset) {
                     consecutiveUpdateFailures = 0
                     Log.e(TAG, "AR session stuck for too many frames — forcing a full session reset")

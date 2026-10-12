@@ -15,8 +15,8 @@ android {
         applicationId = "com.example.splatter"
         minSdk = 26
         targetSdk = 37
-        versionCode = 4
-        versionName = "1.4-magic8pro"
+        versionCode = 5
+        versionName = "1.4.1-magic8pro"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -59,7 +59,6 @@ android {
 
 dependencies {
     implementation(libs.arcore)
-    implementation(libs.play.services.auth)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)

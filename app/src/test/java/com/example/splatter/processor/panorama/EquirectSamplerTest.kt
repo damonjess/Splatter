@@ -90,7 +90,7 @@ class EquirectSamplerTest {
         assertEquals(0, bandOf(dest[4 * 17 + 8]))
     }
 
-    /** 360 × 180 equirect where the grey level encodes the latitude band. */
+    /** 360 × 180 equirect where the grey level encodes the captured-image row. */
     private fun rowBandedSource(): EquirectSampler {
         val w = 360
         val h = 180
@@ -108,17 +108,17 @@ class EquirectSamplerTest {
         val sampler = rowBandedSource()
         val dest = IntArray(17 * 9)
 
-        // 80° down: v = 0.5 + 80/180 of the way down the image.
+        // 80° down: the vertically corrected viewer samples the upper source rows.
         sampler.render(dest, 17, 9, 0f, -(80f * PI.toFloat() / 180f), fov90)
         assertEquals(
-            ((0.5 + 80.0 / 180.0) * 180).toInt() / 6,
+            ((0.5 - 80.0 / 180.0) * 180).toInt() / 6,
             bandOf(dest[4 * 17 + 8])
         )
 
-        // 80° up: the mirror image, near the top of the image.
+        // 80° up: the mirror image, near the bottom of the source image.
         sampler.render(dest, 17, 9, 0f, 80f * PI.toFloat() / 180f, fov90)
         assertEquals(
-            ((0.5 - 80.0 / 180.0) * 180).toInt() / 6,
+            ((0.5 + 80.0 / 180.0) * 180).toInt() / 6,
             bandOf(dest[4 * 17 + 8])
         )
     }
