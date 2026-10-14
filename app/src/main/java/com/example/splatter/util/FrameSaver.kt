@@ -120,50 +120,50 @@ object FrameSaver {
     }
 
     fun convertYuvToJpeg(image: Image): ByteArray {
-        val width = image.width
-        val height = image.height
+        // YUV_420_888 planes are not guaranteed to be tightly packed. Many
+        // devices pad rows and expose interleaved chroma using pixelStride=2;
+        // concatenating buffer.remaining() bytes silently scrambles the saved
+        // photos (and therefore every reconstruction mode).
+        val width = image.width and -2
+        val height = image.height and -2
+        require(width > 0 && height > 0) { "Camera image is too small: ${image.width}x${image.height}" }
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val yBuffer = yPlane.buffer.duplicate()
+        val uBuffer = uPlane.buffer.duplicate()
+        val vBuffer = vPlane.buffer.duplicate()
+        val ySize = width * height
+        val chromaWidth = width / 2
+        val chromaHeight = height / 2
+        val nv21 = ByteArray(ySize + chromaWidth * chromaHeight * 2)
 
-        val yBuffer = image.planes[0].buffer
-        val uBuffer = image.planes[1].buffer
-        val vBuffer = image.planes[2].buffer
+        var dst = 0
+        val yBase = yBuffer.position()
+        for (row in 0 until height) {
+            val rowBase = yBase + row * yPlane.rowStride
+            for (col in 0 until width) {
+                nv21[dst++] = yBuffer.get(rowBase + col * yPlane.pixelStride)
+            }
+        }
 
-        val ySize = yBuffer.remaining()
-        val uSize = uBuffer.remaining()
-        val vSize = vBuffer.remaining()
-
-        val nv21 = ByteArray(ySize + uSize + vSize)
-
-        // Quick merge of planes into NV21 layout
-        yBuffer.get(nv21, 0, ySize)
-
-        val vPixelStride = image.planes[2].pixelStride
-        val uPixelStride = image.planes[1].pixelStride
-
-        if (vPixelStride == 2 && uPixelStride == 2 && vBuffer.remaining() >= uSize) {
-            // Interleaved V and U in vBuffer (standard NV21 layout)
-            vBuffer.get(nv21, ySize, vSize)
-        } else {
-            // Interleave fallback
-            var position = ySize
-            val uBytes = ByteArray(uSize)
-            val vBytes = ByteArray(vSize)
-            uBuffer.get(uBytes)
-            vBuffer.get(vBytes)
-
-            val chromaSize = uSize.coerceAtMost(vSize)
-            for (i in 0 until chromaSize) {
-                if (position < nv21.size) {
-                    nv21[position++] = vBytes[i]
-                }
-                if (position < nv21.size) {
-                    nv21[position++] = uBytes[i]
-                }
+        val uBase = uBuffer.position()
+        val vBase = vBuffer.position()
+        for (row in 0 until chromaHeight) {
+            val uRow = uBase + row * uPlane.rowStride
+            val vRow = vBase + row * vPlane.rowStride
+            for (col in 0 until chromaWidth) {
+                // NV21 chroma order is V then U.
+                nv21[dst++] = vBuffer.get(vRow + col * vPlane.pixelStride)
+                nv21[dst++] = uBuffer.get(uRow + col * uPlane.pixelStride)
             }
         }
 
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
         val out = ByteArrayOutputStream()
         yuvImage.compressToJpeg(Rect(0, 0, width, height), 90, out)
-        return out.toByteArray()
+        return out.toByteArray().also {
+            check(it.isNotEmpty()) { "Could not JPEG-encode camera image" }
+        }
     }
 }

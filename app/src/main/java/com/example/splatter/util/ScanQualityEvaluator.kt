@@ -20,13 +20,13 @@ object ScanQualityEvaluator {
         previouslyScannedAreaDetected: Boolean
     ): ScanQualityState {
         val warnings = mutableListOf<String>()
-
-        val isTooClose = distanceMeters > 0f && distanceMeters < scanMode.minDepthMeters * 1.10f
-        val isTooFar = distanceMeters > 0f && distanceMeters > scanMode.maxDepthMeters * 0.82f
+        val requiresDepth = scanMode == ScanMode.OBJECT || scanMode == ScanMode.ROOM || scanMode == ScanMode.PHOTO
+        val isTooClose = requiresDepth && distanceMeters > 0f && distanceMeters < scanMode.minDepthMeters * 1.10f
+        val isTooFar = requiresDepth && distanceMeters > 0f && distanceMeters > scanMode.maxDepthMeters * 0.82f
 
         val trackingText = when (trackingState) {
             TrackingState.TRACKING -> {
-                if (depthCoveragePercent < 22 || motionMetersPerFrame > 0.25f) "Limited"
+                if ((requiresDepth && depthCoveragePercent < 22) || motionMetersPerFrame > 0.25f) "Limited"
                 else if (isTooFar || isTooClose) "Limited"
                 else "Good"
             }
@@ -54,11 +54,11 @@ object ScanQualityEvaluator {
             warnings += "Low light"
         }
 
-        if (depthCoveragePercent < 28) {
+        if (requiresDepth && depthCoveragePercent < 28) {
             warnings += "Insufficient depth"
         }
 
-        if (motionMetersPerFrame > 0.12f && depthCoveragePercent > 45) {
+        if (motionMetersPerFrame > 0.12f && (!requiresDepth || depthCoveragePercent > 45)) {
             warnings += "Excessive motion blur"
         }
 
@@ -74,7 +74,7 @@ object ScanQualityEvaluator {
             warnings += "Storage becoming low"
         }
 
-        val coverageCells = buildCoverageCells(depthCoveragePercent, scanMode)
+        val coverageCells = if (scanMode == ScanMode.ROOM) buildCoverageCells(depthCoveragePercent, scanMode) else emptyList()
         val estimatedPointCount = estimatePointCount(scanMode, depthCoveragePercent, frameCount)
 
         return ScanQualityState(

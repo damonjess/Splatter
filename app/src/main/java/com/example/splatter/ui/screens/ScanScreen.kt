@@ -153,6 +153,7 @@ fun ScanScreen(
 
                         Spacer(modifier = Modifier.height(8.dp))
 
+                        val requiresDepth = selectedMode == ScanMode.OBJECT || selectedMode == ScanMode.ROOM || selectedMode == ScanMode.PHOTO
                         val metricColor = if (scanQuality.tracking == "Good") Mint else Amber
 
                         Row(
@@ -160,7 +161,15 @@ fun ScanScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text("Tracking: ${scanQuality.tracking}", color = metricColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            Text("Depth coverage: ${scanQuality.depthCoveragePercent}%", color = Color.White, fontSize = 12.sp)
+                            Text(
+                                text = when {
+                                    requiresDepth -> "Depth coverage: ${scanQuality.depthCoveragePercent}%"
+                                    selectedMode == ScanMode.PANORAMA -> "360° cells: ${panoramaCoverageCells.size}/72"
+                                    else -> "Depth-free capture"
+                                },
+                                color = Color.White,
+                                fontSize = 12.sp
+                            )
                         }
 
                         Spacer(modifier = Modifier.height(6.dp))
@@ -170,7 +179,15 @@ fun ScanScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text("Motion: ${scanQuality.motion}", color = Color.White, fontSize = 12.sp)
-                            Text("Distance: ${"%.1f".format(scanQuality.distanceMeters)} m", color = Color.White, fontSize = 12.sp)
+                            Text(
+                                text = when {
+                                    requiresDepth -> "Distance: ${"%.1f".format(scanQuality.distanceMeters)} m"
+                                    selectedMode == ScanMode.PANORAMA -> "Stay in one spot"
+                                    else -> "Keep 60%+ overlap"
+                                },
+                                color = Color.White,
+                                fontSize = 12.sp
+                            )
                         }
 
                         Spacer(modifier = Modifier.height(6.dp))
@@ -180,7 +197,17 @@ fun ScanScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text("Frames/Photos: $frameCount", color = Color.White, fontSize = 12.sp)
-                            Text("Points: ${scanQuality.pointCount}", color = Color.White, fontSize = 12.sp)
+                            Text(
+                                text = if (selectedMode == ScanMode.PANORAMA) {
+                                    "Sweep: cover all 72 cells"
+                                } else if (selectedMode == ScanMode.PHOTO_SFM) {
+                                    "SfM: 6+ overlapping photos"
+                                } else {
+                                    "Points: ${scanQuality.pointCount}"
+                                },
+                                color = Color.White,
+                                fontSize = 12.sp
+                            )
                         }
 
                         if (scanQuality.warnings.isNotEmpty()) {

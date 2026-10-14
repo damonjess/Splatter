@@ -46,7 +46,7 @@ enum class ScanMode(
         enablePlaneDetection = false,
         detailLevelText = "Textured triangle mesh (photogrammetry-style)",
         scanDurationText = "Orbit slowly for full coverage",
-        description = "0.3–5.0 m depth • 4 mm fusion voxel • Textured photo mesh • PLY + OBJ export"
+        description = "0.3–5.0 m depth • 5 mm fusion voxel • Textured photo mesh • PLY + OBJ export"
     ),
     PHOTO_SFM(
         id = "PHOTO_SFM",

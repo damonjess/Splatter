@@ -96,6 +96,11 @@ class MainActivity : ComponentActivity() {
     private var session: Session? = null
     private var glSurfaceView: GLSurfaceView? = null
     private var arCameraRenderer: ARCameraRenderer? = null
+    // The Activity remains resumed during Compose navigation, so the preview
+    // needs its own visibility state and cannot rely only on Activity callbacks.
+    @Volatile
+    private var isARPreviewActive = false
+    private var isActivityResumed = false
     private var userRequestedInstall = true
 
     private lateinit var repository: ScanRepository
@@ -355,6 +360,7 @@ class MainActivity : ComponentActivity() {
                     return
                 }
 
+                deactivateARPreview()
                 currentScreen = AppScreen.PROCESSING
                 val photoMode = recordingSession.scanMode == ScanMode.PHOTO
                 val photoSfmMode = recordingSession.scanMode == ScanMode.PHOTO_SFM
@@ -675,6 +681,7 @@ class MainActivity : ComponentActivity() {
                                 activeSession = newSession
                                 frameCountState.value = 0
                                 isRecordingState.value = false
+                                activateARPreview()
                                 checkAndInitAR()
                                 currentScreen = AppScreen.SCAN
                             }
@@ -783,6 +790,7 @@ class MainActivity : ComponentActivity() {
                                     isRecordingState.value = false
                                     scanStartedAtMs = System.currentTimeMillis()
                                     lastCameraPosition = null
+                                    activateARPreview()
                                     scanQualityState.value = ScanQualityState(frameCount = 0)
                                     checkAndInitAR()
                                 }
@@ -807,6 +815,7 @@ class MainActivity : ComponentActivity() {
                                         }
                                         scanQualityState.value = ScanQualityState(frameCount = 0)
                                         isRecordingState.value = true
+                                        activateARPreview()
                                         checkAndInitAR()
                                         recordPanoramaContext(newSession)
                                     }
@@ -829,6 +838,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onBackClicked = {
                             isRecordingState.value = false
+                            deactivateARPreview()
                             currentScreen = AppScreen.GALLERY
                             refreshGallery()
                         },
@@ -1024,7 +1034,7 @@ class MainActivity : ComponentActivity() {
                 updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
             }
             arSession.configure(config)
-            arSession.resume()
+            if (isARPreviewActive && isActivityResumed) arSession.resume()
             session = arSession
             arCameraRenderer?.resetTextureBinding()
             Log.i(TAG, "AR Session created successfully with depthMode: ${config.depthMode}")
@@ -1047,19 +1057,50 @@ class MainActivity : ComponentActivity() {
         return glSurfaceView!!
     }
 
-    override fun onResume() {
-        super.onResume()
+    /** Start the AR camera when entering Scan without relying on Activity callbacks. */
+    private fun activateARPreview() {
+        isARPreviewActive = true
+        if (!isActivityResumed) return
         try {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                 session?.resume()
             }
+            // Camera textures belong to the GL context; rebind after the view
+            // is detached and later reused from Compose.
+            arCameraRenderer?.resetTextureBinding()
             glSurfaceView?.onResume()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting AR preview: ${e.message}", e)
+        }
+    }
+
+    /** Release the camera and stop the GL thread while Scan is off-screen. */
+    private fun deactivateARPreview() {
+        isARPreviewActive = false
+        try {
+            glSurfaceView?.onPause()
+            session?.pause()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping AR preview: ${e.message}", e)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isActivityResumed = true
+        try {
+            if (isARPreviewActive && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                session?.resume()
+                arCameraRenderer?.resetTextureBinding()
+                glSurfaceView?.onResume()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error resuming session: ${e.message}", e)
         }
     }
 
     override fun onPause() {
+        isActivityResumed = false
         super.onPause()
         glSurfaceView?.onPause()
         session?.pause()
